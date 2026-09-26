@@ -1,0 +1,80 @@
+# สร้างแอป Windows (Sub360-Setup-<version>.exe) บนเครื่อง Windows ของ GitHub
+#
+# - ทุก PR / push: ติดตั้ง → เทสต์ → สร้างไฟล์ติดตั้ง → เปิดแอปจริงแบบ --smoke-test (เปิด server,
+#   เรียก /api/status /api/styles และหน้าแรก) → แนบไฟล์ติดตั้งไว้ในหน้า Actions ให้ลองก่อน merge
+# - push เข้า main ที่ขยับ version ใน package.json แล้ว: ออก GitHub Release v<version>
+#   แอปที่ติดตั้งไว้แล้วอ่าน latest.yml จาก Release นี้เพื่ออัปเดตตัวเอง (electron-updater)
+name: Windows app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-app-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci --no-fund --no-audit
+
+      - name: Test
+        run: npm test
+
+      - name: Build installer
+        run: npx electron-builder --win --publish never
+
+      - name: Smoke test (start the packaged app)
+        shell: pwsh
+        run: |
+          $env:SUB360_HOME = Join-Path $env:RUNNER_TEMP 'sub360-home'
+          $env:SUB360_SMOKE_OUT = Join-Path $env:RUNNER_TEMP 'smoke.json'
+          $p = Start-Process -FilePath 'dist/win-unpacked/Sub360.exe' -ArgumentList '--smoke-test' -PassThru
+          $exited = $p.WaitForExit(120000)
+          if (-not $exited) { $p.Kill() }
+          if (Test-Path $env:SUB360_SMOKE_OUT) { Get-Content $env:SUB360_SMOKE_OUT }
+          foreach ($name in 'server.log', 'app.log') {
+            $log = Join-Path $env:SUB360_HOME "logs/$name"
+            if (Test-Path $log) { Write-Host "--- $name"; Get-Content $log }
+          }
+          if (-not $exited) { Write-Error 'app did not exit within 120s' }
+          if ($p.ExitCode -ne 0) { Write-Error "smoke test failed (exit $($p.ExitCode))" }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sub360-Setup
+          path: |
+            dist/*.exe
+            dist/latest.yml
+          retention-days: 14
+
+      - name: Publish release (new version only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          gh release view "v$v" *> $null
+          if ($LASTEXITCODE -eq 0) { Write-Host "v$v is already released"; exit 0 }
+          $files = @("dist/Sub360-Setup-$v.exe", "dist/Sub360-Setup-$v.exe.blockmap", 'dist/latest.yml')
+          foreach ($f in $files) { if (-not (Test-Path $f)) { Write-Error "missing $f" } }
+          gh release create "v$v" @files --target $env:GITHUB_SHA --title "Sub360 v$v" --notes "ดาวน์โหลด Sub360-Setup-$v.exe แล้วดับเบิลคลิกเพื่อติดตั้ง · แอปที่ติดตั้งไว้แล้วจะอัปเดตเป็นเวอร์ชันนี้เอง"
+          exit 0

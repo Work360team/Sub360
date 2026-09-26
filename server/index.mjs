@@ -18,13 +18,16 @@ import {
 } from "../pipeline/index.mjs";
 import { createStore } from "./store.mjs";
 import {
-  cancelInstall, exposeBinOnPath, installFfmpeg, installWhisper, invalidateSetupStatus, setEnvValue as writeEnv, setupStatus,
+  cancelInstall, exposeBinOnPath, homeDir, installFfmpeg, installWhisper, invalidateSetupStatus, setEnvValue as writeEnv, setupStatus,
 } from "./setup.mjs";
 import { appVersion } from "./version.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const ENV_FILE = path.join(ROOT, ".env");
-loadEnv(ROOT);
+// ที่เก็บงานและการตั้งค่า — แยกจากโค้ดได้ด้วย SUB360_HOME (แอป Windows ใช้ %LOCALAPPDATA%\Sub360)
+const HOME = homeDir(ROOT);
+fs.mkdirSync(HOME, { recursive: true });
+const ENV_FILE = path.join(HOME, ".env");
+loadEnv(HOME);
 // FFmpeg ที่หน้าตั้งค่าติดตั้งไว้ใน data/bin — ใส่ใน PATH ให้ HyperFrames (โปรแกรมลูก) หาเจอด้วย
 exposeBinOnPath(ROOT);
 const PUBLIC = path.join(ROOT, "public");
@@ -35,7 +38,7 @@ const MAX_UPLOAD = 8 * 1024 ** 3;
 const VIDEO_EXT = new Set([".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"]);
 const JOB_TYPES = new Set(["transcribe", "refine", "translate", "render"]);
 // SUB360_DATA_DIR ใช้ทดสอบกับสำเนาข้อมูลได้ โดยไม่ยุ่งกับโปรเจกต์จริงที่อีกตัวกำลังเปิดอยู่
-const store = createStore(process.env.SUB360_DATA_DIR ? path.resolve(process.env.SUB360_DATA_DIR) : path.join(ROOT, "data"));
+const store = createStore(process.env.SUB360_DATA_DIR ? path.resolve(process.env.SUB360_DATA_DIR) : path.join(HOME, "data"));
 
 /* ---------- คิวงาน ---------- */
 
@@ -630,5 +633,10 @@ server.listen(port, HOST, () => {
     const opener = process.platform === "win32" ? ["cmd", ["/c", "start", "", address]]
       : process.platform === "darwin" ? ["open", [address]] : ["xdg-open", [address]];
     spawn(opener[0], opener[1], { detached: true, stdio: "ignore" }).unref();
+  }
+  // เปิดจากแอป Windows (electron/main.cjs) — บอกพอร์ตให้หน้าต่างแอปโหลด และปิดตามเมื่อแอปปิด
+  if (process.send) {
+    process.send({ type: "ready", url: address, version: VERSION });
+    process.on("disconnect", () => process.exit(0));
   }
 });
