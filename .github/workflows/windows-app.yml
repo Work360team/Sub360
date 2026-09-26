@@ -1,4 +1,4 @@
-# สร้างแอป Windows (Sub360-Setup-<version>.exe) บนเครื่อง Windows ของ GitHub
+# สร้างแอป Windows (Sub360-Setup.exe) บนเครื่อง Windows ของ GitHub
 #
 # - ทุก PR / push: ติดตั้ง → เทสต์ → สร้างไฟล์ติดตั้ง → เปิดแอปจริงแบบ --smoke-test (เปิด server,
 #   เรียก /api/status /api/styles และหน้าแรก) → แนบไฟล์ติดตั้งไว้ในหน้า Actions ให้ลองก่อน merge
@@ -74,7 +74,8 @@ jobs:
           $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
           gh release view "v$v" *> $null
           if ($LASTEXITCODE -eq 0) { Write-Host "v$v is already released"; exit 0 }
-          $files = @("dist/Sub360-Setup-$v.exe", "dist/Sub360-Setup-$v.exe.blockmap", 'dist/latest.yml')
+          # ชื่อไฟล์ไม่มีเลขเวอร์ชัน ลิงก์ .../releases/latest/download/Sub360-Setup.exe จึงได้รุ่นล่าสุดเสมอ
+          $files = @('dist/Sub360-Setup.exe', 'dist/Sub360-Setup.exe.blockmap', 'dist/latest.yml')
           foreach ($f in $files) { if (-not (Test-Path $f)) { Write-Error "missing $f" } }
-          gh release create "v$v" @files --target $env:GITHUB_SHA --title "Sub360 v$v" --notes "ดาวน์โหลด Sub360-Setup-$v.exe แล้วดับเบิลคลิกเพื่อติดตั้ง · แอปที่ติดตั้งไว้แล้วจะอัปเดตเป็นเวอร์ชันนี้เอง"
+          gh release create "v$v" @files --target $env:GITHUB_SHA --title "Sub360 v$v" --notes "ดาวน์โหลด Sub360-Setup.exe แล้วดับเบิลคลิกเพื่อติดตั้ง · แอปที่ติดตั้งไว้แล้วจะอัปเดตเป็นเวอร์ชันนี้เอง"
           exit 0

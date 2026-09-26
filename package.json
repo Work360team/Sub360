@@ -1,6 +1,6 @@
 {
   "name": "sub360",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Sub360 — ถอดเสียงวิดีโอและใส่ซับไทยสวย ๆ บนเครื่องของคุณเอง",
   "author": "Work360team",
   "homepage": "https://github.com/Work360team/Sub360",
@@ -30,7 +30,7 @@
     "appId": "com.work360.sub360",
     "productName": "Sub360",
     "executableName": "Sub360",
-    "artifactName": "Sub360-Setup-${version}.${ext}",
+    "artifactName": "Sub360-Setup.${ext}",
     "directories": {
       "output": "dist"
     },
