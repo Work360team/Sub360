@@ -13,7 +13,7 @@
 
 ## ติดตั้ง (Windows 10/11)
 
-ดาวน์โหลด **`Sub360-Setup-x.y.z.exe`** จาก [Releases ล่าสุด](https://github.com/Work360team/Sub360/releases/latest) แล้วดับเบิลคลิก
+ดาวน์โหลด **[`Sub360-Setup.exe`](https://github.com/Work360team/Sub360/releases/latest/download/Sub360-Setup.exe)** (ลิงก์นี้ได้เวอร์ชันล่าสุดเสมอ) แล้วดับเบิลคลิก
 ติดตั้งเสร็จจะเปิดแอปให้เอง มีไอคอน Sub360 บน Desktop และ Start menu และแอปจะอัปเดตตัวเองเมื่อมีเวอร์ชันใหม่
 (ไฟล์ยังไม่ได้เซ็นชื่อดิจิทัล ครั้งแรก Windows จะขึ้น "Windows protected your PC" → กด **More info** → **Run anyway**)
 
