@@ -9,6 +9,11 @@ chcp 65001 >nul
 title Sub360
 cd /d "%~dp0"
 
+rem Portable Node.js and Git that the installer (scripts\install.ps1) put in
+rem runtime\ win over whatever is (or is not) installed system-wide.
+if exist "runtime\node\node.exe" set "PATH=%CD%\runtime\node;%PATH%"
+if exist "runtime\git\cmd\git.exe" set "PATH=%CD%\runtime\git\cmd;%PATH%"
+
 where node >nul 2>nul
 if errorlevel 1 goto node_missing
 
