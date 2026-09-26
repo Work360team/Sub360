@@ -1,0 +1,7 @@
+* text=auto
+# cmd.exe อ่านไฟล์ .bat ที่ขึ้นบรรทัดแบบ LF ผิดตำแหน่ง (เจอจริง: รันคำสั่งจากกลางบรรทัด) ต้องเป็น CRLF เสมอ
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ttf binary
+*.woff2 binary
+*.mp4 binary

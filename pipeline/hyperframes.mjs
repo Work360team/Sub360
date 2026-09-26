@@ -1,0 +1,414 @@
+// hyperframes — เลน B: คอมไพล์ timeline เป็น composition แล้วเรนเดอร์เป็นเลเยอร์ซับโปร่งใส
+//                →  อนาคตคือ packages/media/hyperframes
+//
+// ต่างจากเลน A (libass เบิร์นลงภาพตรง ๆ) ตรงที่เลนนี้เรนเดอร์ "เฉพาะตัวหนังสือ" ออกมาเป็นไฟล์ที่มี
+// alpha แล้วค่อยเอาไปวางทับด้วย ffmpeg — คลิปต้นฉบับจึงไม่ถูก re-encode ผ่าน Chrome
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { ffmpeg, ffprobe, run } from "./lib.mjs";
+import { anchorMarginV, normalizeAnchor } from "./thai.mjs";
+// Sub360 ไม่มีช็อตโมชันกราฟิก — ซับอย่างเดียว
+const compileMotionShots = async () => null;
+const isCoveredByMotion = () => false;
+
+// This module lives directly in pipeline/. Keep media assets relative to the
+// module; workspace dependencies are resolved one level above in
+// resolveHyperframesBin().
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
+const GSAP = path.join(ROOT, "vendor", "gsap.min.js");
+
+const esc = (s) =>
+  String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/** ฝังฟอนต์เป็น data URI — เลี่ยงจุดที่พังเงียบที่สุดของการเรนเดอร์ใน headless Chrome */
+function fontFace(family, file, weight) {
+  const b64 = fs.readFileSync(file).toString("base64");
+  return `@font-face{font-family:'${family}';font-weight:${weight};font-style:normal;font-display:block;` +
+    `src:url(data:font/ttf;base64,${b64}) format('truetype')}`;
+}
+
+export function compileComposition(timeline, style, { width, height, fps = 30, motion = null }) {
+  const p = style.params;
+  const fontFile = path.join(ROOT, "fonts", p.font.file);
+  if (!fs.existsSync(fontFile)) {
+    throw new Error(`ไม่พบฟอนต์ ${p.font.file} ใน pipeline/fonts`);
+  }
+
+  // สไตล์ที่สลับน้ำหนักตัวอักษรต้องฝังสองหน้าฟอนต์ ไม่งั้นเบราว์เซอร์จะปลอมตัวหนา
+  // ด้วยการทำ synthetic bold ซึ่งขอบจะเละตอนซ้อนกับเส้นขอบ
+  let altFontCss = "";
+  if (p.weightShift?.file) {
+    const altFile = path.join(ROOT, "fonts", p.weightShift.file);
+    if (!fs.existsSync(altFile)) throw new Error(`ไม่พบฟอนต์ ${p.weightShift.file} ใน pipeline/fonts`);
+    altFontCss = fontFace(p.font.family, altFile, p.weightShift.base ?? 600);
+  }
+
+  const dur = (timeline.durationMs / 1000).toFixed(3);
+
+  // marginV = ระยะห่างจากขอบที่ยึด ให้ตีความเหมือนเลน A เป๊ะ ๆ
+  // (ก่อนหน้านี้เลนนี้คำนวณกลับด้านเป็น height - marginV สไตล์เดียวกันจึงไปโผล่คนละที่)
+  const anchor = normalizeAnchor(p.position?.anchor);
+  const marginV = anchorMarginV(anchor, p.position?.marginV);
+  const placement =
+    anchor === "top"
+      ? `top: ${marginV}px; bottom: auto;`
+      : anchor === "middle"
+        ? "top: 50%; bottom: auto; transform: translateY(-50%);"
+        : `bottom: ${marginV}px; top: auto;`;
+
+  // ท่อนที่ยาวกว่าเกณฑ์จะย่อฟอนต์ลงพอดีหนึ่งบรรทัด — ปล่อยให้ตัดบรรทัดเองจะได้คำโดด ๆ ห้อยอยู่
+  // (ประมาณจากจำนวน grapheme พอใช้ได้กับไทย เพราะความกว้างต่อตัวค่อนข้างสม่ำเสมอ)
+  const FIT_CHARS = p.fitChars ?? 14;
+  const fitScale = (n) => Math.max(0.68, Math.min(1, FIT_CHARS / Math.max(1, n)));
+
+  const clips = timeline.chunks
+    .map((c, ci) => {
+      const spans = c.words
+        .map((w, wi) => {
+          // ช่องว่างเดิมถูกผนวกไว้ท้ายคำตอนตัดคำ จึงต้องดูจากข้อความต้นฉบับ ไม่ใช่ช่องว่างระหว่าง index
+          const trailingSpace = /\s$/.test(c.text.slice(w.s, w.e));
+          return (
+            `<span class="w${w.emphasis ? " em" : ""}" id="c${ci}w${wi}">${esc(w.text)}</span>` +
+            (trailingSpace ? '<span class="sp"> </span>' : "")
+          );
+        })
+        .join("");
+      const chars = c.words.reduce((n, w) => n + w.text.length, 0);
+      const size = Math.round(p.font.size * fitScale(chars));
+      return (
+        `<div id="c${ci}" class="clip cap" data-start="${(c.startMs / 1000).toFixed(3)}" ` +
+        `data-duration="${((c.endMs - c.startMs) / 1000).toFixed(3)}" data-track-index="0">` +
+        `<div class="line" id="l${ci}" style="font-size:${size}px">${spans}</div>` +
+        // คำแปล (โหมดสองภาษา) อยู่ใต้บรรทัดต้นฉบับในกล่องเดียวกัน ความสูงจึงดันกันเองตามจริง
+        (c.sub ? `<div class="tr" id="t${ci}">${esc(c.sub)}</div>` : "") +
+        `</div>`
+      );
+    })
+    .join("\n      ");
+
+  const beats = [];
+  timeline.chunks.forEach((c, ci) => {
+    beats.push({ t: c.startMs / 1000, sel: `#l${ci}`, kind: "enter" });
+    if (c.sub) beats.push({ t: c.startMs / 1000, sel: `#t${ci}`, kind: "enter" });
+    c.words.forEach((w, wi) => {
+      beats.push({
+        t: w.startMs / 1000,
+        sel: `#c${ci}w${wi}`,
+        kind: "on",
+        color: w.emphasis && p.emphasisFill ? p.emphasisFill : p.activeFill,
+      });
+      beats.push({ t: w.endMs / 1000, sel: `#c${ci}w${wi}`, kind: "off" });
+    });
+  });
+
+  return `<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=${width}, height=${height}" />
+    <title>${esc(style.name)}</title>
+    <style>
+      ${fontFace(p.font.family, fontFile, p.font.weight)}
+      ${altFontCss}
+      html, body { margin: 0; padding: 0; background: transparent; }
+      #root {
+        position: relative;
+        width: ${width}px;
+        height: ${height}px;
+        overflow: hidden;
+        background: transparent;
+      }
+      .cap {
+        position: absolute;
+        left: 0;
+        right: 0;
+        ${placement}
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 0 ${p.position?.marginH ?? 80}px;
+      }
+      .tr {
+        max-width: 100%;
+        margin-top: ${Math.round(p.font.size * 0.14)}px;
+        font-family: '${p.font.family}', sans-serif;
+        font-weight: 700;
+        font-size: ${Math.round(p.font.size * 0.58)}px;
+        line-height: 1.22;
+        text-align: center;
+        color: ${p.fill};
+        -webkit-text-stroke: ${Math.round((p.outline.width || 0) * 0.7)}px ${p.outline.color};
+        paint-order: stroke fill;
+        ${p.shadow ? `text-shadow: 0 ${Math.round((p.shadow.offset ?? 3) * 0.7)}px 0 ${p.shadow.color || "rgba(0,0,0,.5)"};` : ""}
+        ${p.pill ? `padding: ${Math.round((p.pill.padV ?? 18) * 0.6)}px ${Math.round((p.pill.padH ?? 34) * 0.6)}px; border-radius: ${Math.min(999, p.pill.radius ?? 999)}px; background: ${p.pill.color ?? "rgba(0,0,0,0.62)"};` : ""}
+      }
+      .line {
+        display: flex;
+        flex-wrap: nowrap;
+        justify-content: center;
+        align-items: flex-end;
+        max-width: 100%;
+        font-size: ${p.font.size}px;
+        ${p.pill ? `padding: ${p.pill.padV ?? 18}px ${p.pill.padH ?? 34}px; border-radius: ${p.pill.radius ?? 999}px; background: ${p.pill.color ?? "rgba(0,0,0,0.62)"};` : ""}
+      }
+      .w, .sp {
+        font-family: '${p.font.family}', sans-serif;
+        font-weight: ${p.font.weight};
+        font-size: inherit;
+        line-height: 1.16;
+        color: ${p.fill};
+        -webkit-text-stroke: ${p.outline.width}px ${p.outline.color};
+        paint-order: stroke fill;
+        ${p.shadow && !p.gradient ? `text-shadow: 0 ${p.shadow.offset}px 0 ${p.shadow.color};` : ""}
+        ${p.glow ? `text-shadow: 0 0 ${p.glow.blur ?? 18}px ${p.glow.color ?? "#38f6ff"}, 0 0 ${(p.glow.blur ?? 18) * 2.4}px ${p.glow.color ?? "#38f6ff"};` : ""}
+        ${p.glitch ? `text-shadow: ${-(p.glitch.offset ?? 6)}px 0 0 ${p.glitch.cyan ?? "#00E5FF"}, ${p.glitch.offset ?? 6}px 0 0 ${p.glitch.red ?? "#FF2D55"};` : ""}
+        ${p.weightShift ? `font-weight: ${p.weightShift.base ?? 600};` : ""}
+        /* ตัวอักษรจะโปร่งใสเพื่อให้เห็นไล่สี ถ้ายังมี text-shadow อยู่ เงาจะทะลุขึ้นมา
+           กลางตัวอักษรเป็นก้อนทึบ ด้านบนจึงตัด text-shadow ทิ้งเมื่อใช้ไล่สี
+           ส่วนเส้นขอบใช้ -webkit-text-stroke ที่วาดอยู่หลังฟิล (paint-order) จึงไม่กวน */
+        ${p.gradient ? `background-image: linear-gradient(${p.gradient.angle ?? 100}deg, ${p.gradient.from}, ${p.gradient.to}); -webkit-background-clip: text; background-clip: text; color: transparent;` : ""}
+        display: inline-block;
+        transform-origin: 50% 78%;
+        white-space: pre;
+      }
+      .sp { -webkit-text-stroke: 0; }
+      ${p.emphasis ? `.w.em { font-size: ${p.emphasis.scale ?? 1.5}em; ${p.emphasis.weight ? `font-weight: ${p.emphasis.weight};` : ""} }` : ""}
+      /* ซับต้องอยู่เหนือช็อตโมชันเสมอ ไม่งั้นจอทึบจะบังคำบรรยายของตัวเอง */
+      .clip.mo { z-index: 1; }
+      .cap { z-index: 2; }
+      ${motion?.css || ""}
+      ${p.scanlines ? `.cap::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+        background: repeating-linear-gradient(180deg, rgba(0,0,0,${p.scanlines.alpha ?? 0.22}) 0px, rgba(0,0,0,${p.scanlines.alpha ?? 0.22}) 1px, transparent 1px, transparent ${p.scanlines.gap ?? 4}px); }` : ""}
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="captions"
+      data-start="0"
+      data-duration="${dur}"
+      data-width="${width}"
+      data-height="${height}"
+      data-fps="${fps}"
+    >
+      ${motion?.html || ""}
+      ${clips}
+    </div>
+
+    <script>${fs.readFileSync(GSAP, "utf8")}</script>
+    <script>
+      (function () {
+        gsap.defaults({ immediateRender: false });
+        var FILL = ${JSON.stringify(p.fill)};
+        // ท่าเข้าของแต่ละบรรทัด อิงจากคอมโพเนนต์ในแคตตาล็อก HyperFrames
+        var ENTERS = {
+          blur:  { from: { y: 34, opacity: 0, filter: "blur(6px)" }, to: { y: 0, opacity: 1, filter: "blur(0px)" }, duration: 0.18, ease: "power3.out" },
+          slam:  { from: { scale: 1.9, opacity: 0 }, to: { scale: 1, opacity: 1 }, duration: 0.22, ease: "back.out(3)" },
+          wipe:  { from: { clipPath: "inset(0 100% 0 0)", opacity: 1 }, to: { clipPath: "inset(0 0% 0 0)", opacity: 1 }, duration: 0.26, ease: "power2.inOut" },
+          rise:  { from: { y: 70, opacity: 0 }, to: { y: 0, opacity: 1 }, duration: 0.24, ease: "power4.out" },
+          squeeze: { from: { scaleX: 0.35, scaleY: 1.25, opacity: 0 }, to: { scaleX: 1, scaleY: 1, opacity: 1 }, duration: 0.26, ease: "back.out(2.2)" },
+          none:  { from: { opacity: 1 }, to: { opacity: 1 }, duration: 0.01, ease: "none" },
+        };
+        var ENTER = ENTERS[${JSON.stringify(p.animation?.enter ?? "blur")}] || ENTERS.blur;
+        var WEIGHT_ON = ${JSON.stringify(p.weightShift?.active ?? null)};
+        var WEIGHT_OFF = ${JSON.stringify(p.weightShift?.base ?? null)};
+        var WIGGLE = ${JSON.stringify(p.wiggle ?? null)};
+        var POP = ${JSON.stringify(p.animation?.scale ?? 1.12)};
+        var POP_S = ${JSON.stringify((p.animation?.durationMs ?? 160) / 1000)};
+        var BEATS = ${JSON.stringify(beats)};
+        var MOTION_BEATS = ${JSON.stringify(motion?.beats || [])};
+
+        gsap.set(".w", { color: FILL, scale: 1, y: 0 });
+        var tl = gsap.timeline({ paused: true });
+
+        BEATS.forEach(function (b) {
+          if (b.kind === "enter") {
+            tl.fromTo(b.sel, ENTER.from, Object.assign({}, ENTER.to, { duration: ENTER.duration, ease: ENTER.ease }), b.t);
+          } else if (b.kind === "on") {
+            tl.set(b.sel, WEIGHT_ON ? { color: b.color, fontWeight: WEIGHT_ON } : { color: b.color }, b.t);
+            tl.fromTo(
+              b.sel,
+              { scale: POP, y: -8 },
+              { scale: 1, y: 0, duration: POP_S, ease: "back.out(2.4)" },
+              b.t,
+            );
+          } else {
+            tl.set(b.sel, WEIGHT_OFF ? { color: FILL, fontWeight: WEIGHT_OFF } : { color: FILL }, b.t);
+          }
+        });
+
+        // ช็อตโมชันกราฟิก — เทมเพลตส่งคำสั่งมาเป็นข้อมูล ไม่ใช่โค้ด ตัวขับตีความเองที่นี่
+        // รับเฉพาะ set กับ fromTo ซึ่งเป็นคุณสมบัติที่ GSAP วาดจริง ห้ามมี callback
+        // เพราะ HyperFrames เรนเดอร์ทีละเฟรมด้วย seek() ซึ่งระงับ callback ทั้งหมด
+        // (วัดแล้ว: seek(t) ไม่เรียก onUpdate ส่วน seek(t, false) เรียก)
+        // จะได้ไม่ต้อง eval สตริงจากไฟล์เทมเพลต และทุกท่ายังอยู่บนไทม์ไลน์เดียวกับซับ
+        MOTION_BEATS.forEach(function (b) {
+          if (b.kind === "set") {
+            tl.set(b.sel, b.vars || {}, b.t);
+          } else if (b.kind === "fromTo") {
+            tl.fromTo(b.sel, b.from || {}, Object.assign({}, b.to, {
+              duration: b.duration || 0.3,
+              ease: b.ease || "power2.out",
+            }), b.t);
+          }
+        });
+
+        // ส่ายเบา ๆ ตลอดคลิป (Neon Accent) — เล่นวนบนไทม์ไลน์เดียวกัน ไม่ใช่ลูปแยก
+        // เพราะ HyperFrames เรนเดอร์ทีละเฟรมจากตำแหน่งเวลาบนไทม์ไลน์นี้เท่านั้น
+        if (WIGGLE) {
+          var period = (WIGGLE.durationMs || 1600) / 1000;
+          for (var t = 0; t < ${dur}; t += period) {
+            tl.to(".w", { y: "+=" + (WIGGLE.amountPx || 4), rotation: WIGGLE.rotateDeg || 1.2, duration: period / 2, ease: "sine.inOut" }, t);
+            tl.to(".w", { y: "-=" + (WIGGLE.amountPx || 4), rotation: -(WIGGLE.rotateDeg || 1.2), duration: period / 2, ease: "sine.inOut" }, t + period / 2);
+          }
+        }
+
+        tl.set({}, {}, ${dur});
+        tl.seek(0);
+        window.__timelines = window.__timelines || {};
+        window.__timelines.captions = tl;
+      })();
+    </script>
+  </body>
+</html>
+`;
+}
+
+/**
+ * เขียน project แล้วเรียก HyperFrames CLI เรนเดอร์เป็นไฟล์ที่มี alpha
+ * คืน path ของไฟล์เลเยอร์ซับ (webm ถ้า alpha ใช้ได้ ไม่งั้นถอยไป mov/ProRes 4444)
+ */
+export class AlphaOverlayError extends Error {
+  constructor(message, details = {}) {
+    super(message);
+    this.name = "AlphaOverlayError";
+    this.code = "ALPHA_OVERLAY_INVALID";
+    Object.assign(this, details);
+  }
+}
+
+function resolveHyperframesBin() {
+  const workspaceRoot = path.resolve(ROOT, "..");
+  const candidates = [
+    process.env.HYPERFRAMES_BIN && path.resolve(process.env.HYPERFRAMES_BIN),
+    path.join(workspaceRoot, "node_modules", "hyperframes", "bin", "hyperframes.mjs"),
+    path.join(ROOT, "node_modules", "hyperframes", "bin", "hyperframes.mjs"),
+    // Transitional fallback for this repository while the root package remains
+    // untouched. Production can set HYPERFRAMES_BIN explicitly.
+    path.join(workspaceRoot, "node_modules", "hyperframes", "bin", "hyperframes.mjs"),
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+}
+
+/** Validate both the declared pixel format and actual frame alpha values. */
+export async function validateOverlayAlpha(file, timeline, opts = {}) {
+  const { out } = await ffprobe([
+    "-v", "error",
+    "-select_streams", "v:0",
+    "-show_entries", "stream=pix_fmt",
+    "-of", "default=noprint_wrappers=1:nokey=1",
+    file,
+  ], { signal: opts.signal, timeoutMs: opts.timeoutMs });
+  const pixelFormat = out.trim().split(/\r?\n/)[0] || "unknown";
+  if (!/(yuva|rgba|argb|bgra|gbrap)/i.test(pixelFormat)) {
+    throw new AlphaOverlayError(`เลเยอร์ซับไม่มี alpha channel (${pixelFormat})`, { file, pixelFormat });
+  }
+
+  // ต้องสุ่มเฟรมที่ "มีซับแต่ไม่มีช็อตโมชันบัง" — ช็อตโมชันทึบเต็มจอโดยตั้งใจ
+  // ถ้าไปเจอเฟรมนั้นเข้า ตัวตรวจจะเห็นว่าทึบทั้งเฟรมแล้วตีว่าเลเยอร์เสีย
+  // ทั้งที่เป็นพฤติกรรมที่ถูกต้อง แล้วทั้งงานจะถอยไปเลน libass โดยไม่จำเป็น
+  const motionShots = opts.motionShots || [];
+  const sampleAt = (chunk) =>
+    (chunk.startMs + Math.min(250, Math.max(1, chunk.endMs - chunk.startMs) / 2));
+  const candidate = (timeline.chunks || [])
+    .map(sampleAt)
+    .find((ms) => !isCoveredByMotion(ms, motionShots));
+  const atSec = Math.max(0, (candidate ?? (timeline.chunks?.[0] ? sampleAt(timeline.chunks[0]) : 0)) / 1000);
+  let diagnostics = "";
+  try {
+    ({ err: diagnostics } = await ffmpeg([
+      "-ss", atSec.toFixed(3),
+      "-i", file,
+      "-frames:v", "1",
+      // ต้องแปลงเป็น rgba ก่อนเสมอ ไม่งั้น YAVG ออกมาในสเกลดิบของไฟล์: ProRes 4444
+      // ที่เราใช้เป็นเลเยอร์ซับเป็น 12 บิตและยังบีบช่วงอีก (โปร่งสุด=256 ทึบสุด=3750)
+      // เทียบกับเกณฑ์ 0–255 ตรง ๆ ไม่ได้เลย
+      "-vf", "format=rgba,alphaextract,signalstats,metadata=print",
+      "-f", "null", "-",
+    ], { signal: opts.signal, timeoutMs: opts.timeoutMs }));
+  } catch (error) {
+    if (error?.name === "AbortError" || error?.code === "PROCESS_TIMEOUT") throw error;
+    throw new AlphaOverlayError(`ตรวจ alpha frame ไม่สำเร็จ: ${error.message}`, { file, pixelFormat });
+  }
+
+  const alphaAverage = Number(/lavfi\.signalstats\.YAVG=([0-9.]+)/.exec(diagnostics)?.[1]);
+  // ผ่าน format=rgba มาแล้วค่าจึงอยู่บนสเกล 0–255 จริง เทียบกับสองปลายได้ตรง ๆ:
+  // 0 = โปร่งทั้งเฟรม (ไม่มีซับ) · 255 = ทึบทั้งเฟรม (เอาไปทับวิดีโอแล้วจอดำ)
+  if (!Number.isFinite(alphaAverage) || alphaAverage <= 0.05 || alphaAverage >= 254.95) {
+    throw new AlphaOverlayError(
+      `alpha frame ผิดปกติ (ค่าเฉลี่ย ${Number.isFinite(alphaAverage) ? alphaAverage.toFixed(2) : "อ่านไม่ได้"} จาก 255)`,
+      { file, pixelFormat, alphaAverage },
+    );
+  }
+  return { pixelFormat, alphaAverage, atSec };
+}
+
+export async function renderOverlay(timeline, style, runDir, opts, onLog = () => {}) {
+  const hfDir = path.join(runDir, "hf");
+  fs.mkdirSync(hfDir, { recursive: true });
+  const motion = await compileMotionShots(opts.motionShots, {
+    width: opts.width,
+    height: opts.height,
+    font: style.params?.font,
+    captionAnchor: normalizeAnchor(style.params?.position?.anchor),
+  });
+  fs.writeFileSync(
+    path.join(hfDir, "index.html"),
+    compileComposition(timeline, style, { ...opts, motion }),
+    "utf8",
+  );
+
+  // เรียก entry .mjs ของ hyperframes ด้วย node โดยตรง
+  // อย่าเรียกผ่าน npx/npx.cmd — Node บน Windows บล็อกการ spawn .cmd (CVE-2024-27980)
+  // และ cmd.exe ยังพัง path ภาษาไทยเพราะ codepage อีกชั้น
+  const bin = resolveHyperframesBin();
+  if (!bin) {
+    const error = new Error("ไม่พบ HyperFrames CLI — ตั้ง HYPERFRAMES_BIN หรือเพิ่มแพ็กเกจ hyperframes ใน runtime");
+    error.code = "HYPERFRAMES_UNAVAILABLE";
+    throw error;
+  }
+
+  const render = async (format) => {
+    const out = path.join(runDir, `captions.${format}`);
+    await run(process.execPath, [
+      bin, "render", hfDir,
+      "--format", format,
+      "--fps", String(opts.fps),
+      "--quality", "high",
+      "--output", out,
+    ], {
+      cwd: runDir,
+      signal: opts.signal,
+      timeoutMs: opts.timeoutMs ?? Number(process.env.HYPERFRAMES_TIMEOUT_MS || 20 * 60_000),
+    });
+    return out;
+  };
+
+  // วัดแล้ว: webm ที่ HyperFrames 0.7.106 ออกมาถอดรหัสได้เป็น yuv420p ไม่มี alpha จริง
+  // (ตรวจทั้งระดับ stream และระดับ frame) จึงใช้ mov/ProRes 4444 เป็นค่าเริ่มต้น
+  // ไฟล์ใหญ่กว่ามากแต่เป็นแค่ไฟล์ระหว่างทาง และไม่ต้องเสียเวลาเรนเดอร์สองรอบ
+  const format = opts.overlayFormat || "mov";
+  const file = await render(format);
+
+  try {
+    const alpha = await validateOverlayAlpha(file, timeline, opts);
+    await onLog(`ตรวจ alpha ผ่าน: ${alpha.pixelFormat} · avg ${alpha.alphaAverage.toFixed(2)}/255`);
+  } catch (error) {
+    fs.rmSync(file, { force: true });
+    if (error instanceof AlphaOverlayError) throw error;
+    throw new AlphaOverlayError(`ตรวจ alpha overlay ไม่สำเร็จ: ${error.message}`, { file, cause: error });
+  }
+  return file;
+}

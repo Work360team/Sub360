@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="th">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#111412" />
+    <title>Sub360 — ซับไทยสวย ๆ จากเสียงจริง</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="preload" href="/fonts/kanit-thai-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <aside class="sidebar" id="sidebar" aria-label="เมนูหลัก">
+      <div class="sidebar-head">
+        <a class="brand" href="#/" aria-label="Sub360 หน้าแรก">
+          <svg class="brand-mark" viewBox="0 0 40 40" aria-hidden="true"><rect width="40" height="40" rx="12" fill="#1c201d"/><rect x="7" y="23" width="26" height="8" rx="4" fill="#ffd23f"/><rect x="11" y="12" width="18" height="5.5" rx="2.75" fill="#f5f4ef"/><circle cx="33" cy="7" r="4.5" fill="#111412" stroke="#ffd23f" stroke-width="2.5"/></svg>
+          <span class="brand-word">Sub<em>360</em></span>
+        </a>
+        <button class="icon-button sidebar-close" id="sidebar-close" aria-label="ปิดเมนู"><i data-icon="x"></i></button>
+      </div>
+      <a class="sidebar-create" href="#/new"><i data-icon="plus"></i>สร้างซับใหม่</a>
+      <div class="nav-kicker">พื้นที่ทำงาน</div>
+      <nav class="sidebar-nav">
+        <a class="sidebar-link" href="#/" data-nav="home"><i data-icon="grid"></i>ภาพรวม</a>
+        <a class="sidebar-link" href="#/projects" data-nav="projects"><i data-icon="film"></i>โปรเจกต์</a>
+        <a class="sidebar-link" href="#/new" data-nav="new"><i data-icon="sparkles"></i>สร้างซับ</a>
+        <a class="sidebar-link" href="#/styles" data-nav="styles"><i data-icon="captions"></i>สไตล์ซับ</a>
+        <a class="sidebar-link" href="#/settings" data-nav="settings"><i data-icon="gear"></i>ตั้งค่า</a>
+      </nav>
+      <div class="sidebar-section-title"><span>โปรเจกต์ล่าสุด</span><a href="#/projects" aria-label="ดูโปรเจกต์ทั้งหมด"><i data-icon="chevronRight"></i></a></div>
+      <div class="sidebar-projects" id="side-projects"></div>
+      <div class="sidebar-bottom">
+        <div class="system-ready checking" id="system-ready">
+          <span class="status-orbit"><span></span></span>
+          <div><b>กำลังตรวจเครื่อง…</b><small>whisper · FFmpeg · Gemini</small></div>
+        </div>
+        <a class="help-link" href="#/setup"><i data-icon="help"></i>ตัวช่วยตั้งค่าครั้งแรก</a>
+      </div>
+    </aside>
+    <div class="sidebar-scrim" id="sidebar-scrim"></div>
+
+    <div class="content-frame">
+      <header class="topbar">
+        <div class="topbar-leading">
+          <button class="icon-button menu-button" id="menu-button" aria-label="เปิดเมนู"><i data-icon="menu"></i></button>
+          <div class="crumb"><i data-icon="folder" class="i-sm"></i><span>พื้นที่ของฉัน</span><i data-icon="chevronRight" class="i-sm"></i><b id="crumb-page">ภาพรวม</b></div>
+        </div>
+        <div class="topbar-actions">
+          <span class="engine-chip" id="engine-chip"><i data-icon="radio" class="i-sm"></i><span>LOCAL กำลังตรวจ…</span></span>
+          <div class="profile-chip">
+            <svg class="avatar" viewBox="0 0 40 40" aria-hidden="true"><rect width="40" height="40" rx="12" fill="#21261f"/><rect x="8" y="23" width="24" height="7" rx="3.5" fill="#ffd23f"/><rect x="12" y="13" width="16" height="5" rx="2.5" fill="#f5f4ef"/></svg>
+            <div class="profile-copy"><b>Sub360 Local</b><small>ไม่ต้องมีบัญชี</small></div>
+          </div>
+        </div>
+      </header>
+      <main class="page-content" id="view"></main>
+    </div>
+
+    <nav class="mobile-nav" aria-label="เมนูลัด">
+      <a href="#/" data-nav="home"><i data-icon="grid"></i><span>ภาพรวม</span></a>
+      <a href="#/projects" data-nav="projects"><i data-icon="film"></i><span>โปรเจกต์</span></a>
+      <a href="#/new" data-nav="new" class="create"><i data-icon="plus"></i><span>สร้าง</span></a>
+      <a href="#/styles" data-nav="styles"><i data-icon="captions"></i><span>สไตล์</span></a>
+      <a href="#/settings" data-nav="settings"><i data-icon="gear"></i><span>ตั้งค่า</span></a>
+    </nav>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <div id="modal-root"></div>
+    <script src="/vendor/gsap.min.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

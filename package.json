@@ -1,0 +1,19 @@
+{
+  "name": "sub360",
+  "version": "0.1.0",
+  "description": "Sub360 — ถอดเสียงวิดีโอและใส่ซับไทยสวย ๆ บนเครื่องของคุณเอง",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "sub": "node scripts/sub-cli.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "start": "node server/index.mjs --open",
+    "dev": "node --watch server/index.mjs"
+  },
+  "dependencies": {
+    "hyperframes": "0.7.106"
+  }
+}
