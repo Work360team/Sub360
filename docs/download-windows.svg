@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="460" height="84" viewBox="0 0 460 84" role="img" aria-label="ดาวน์โหลด Sub360 สำหรับ Windows">
+  <title>ดาวน์โหลด Sub360 สำหรับ Windows</title>
+  <rect x="2" y="6" width="456" height="76" rx="18" fill="#1c201d" opacity="0.18"/>
+  <rect x="0" y="0" width="456" height="76" rx="18" fill="#ffd23f"/>
+  <rect x="0.75" y="0.75" width="454.5" height="74.5" rx="17.25" fill="none" stroke="#1c201d" stroke-opacity="0.12" stroke-width="1.5"/>
+  <g transform="translate(26 22)" fill="#1c201d">
+    <rect x="0" y="0" width="15" height="15" rx="1.5"/>
+    <rect x="17" y="0" width="15" height="15" rx="1.5"/>
+    <rect x="0" y="17" width="15" height="15" rx="1.5"/>
+    <rect x="17" y="17" width="15" height="15" rx="1.5"/>
+  </g>
+  <text x="76" y="36" fill="#1c201d" font-family="'Segoe UI','Leelawadee UI','Noto Sans Thai','Sarabun','Tahoma',sans-serif" font-size="22" font-weight="700">ดาวน์โหลดสำหรับ Windows</text>
+  <text x="76" y="58" fill="#1c201d" fill-opacity="0.72" font-family="'Segoe UI','Leelawadee UI','Noto Sans Thai','Sarabun','Tahoma',sans-serif" font-size="14">Sub360-Setup.exe · ฟรี · Windows 10/11</text>
+  <g transform="translate(408 24)" fill="none" stroke="#1c201d" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M13 2v19M5 13l8 8 8-8M3 27h20"/>
+  </g>
+</svg>
