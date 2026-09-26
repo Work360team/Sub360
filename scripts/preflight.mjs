@@ -10,6 +10,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { loadEnv } from "../pipeline/lib.mjs";
+import { appVersion } from "../server/version.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ok = (msg) => console.log(`  [พร้อม] ${msg}`);
@@ -18,6 +19,7 @@ const fail = (msg) => console.log(`  [ต้องแก้] ${msg}`);
 
 console.log("\n  ========================================");
 console.log("    Sub360 — ซับไทยสวย ๆ จากเสียงจริง");
+console.log(`    เวอร์ชัน ${appVersion(ROOT).label}`);
 console.log("  ========================================\n");
 
 // Node รุ่นเก่ากว่านี้ไม่มี Intl.Segmenter ภาษาไทยและ AbortSignal.any ที่ระบบใช้

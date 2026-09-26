@@ -20,6 +20,7 @@ import { createStore } from "./store.mjs";
 import {
   cancelInstall, exposeBinOnPath, installFfmpeg, installWhisper, invalidateSetupStatus, setEnvValue as writeEnv, setupStatus,
 } from "./setup.mjs";
+import { appVersion } from "./version.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ENV_FILE = path.join(ROOT, ".env");
@@ -27,6 +28,8 @@ loadEnv(ROOT);
 // FFmpeg ที่หน้าตั้งค่าติดตั้งไว้ใน data/bin — ใส่ใน PATH ให้ HyperFrames (โปรแกรมลูก) หาเจอด้วย
 exposeBinOnPath(ROOT);
 const PUBLIC = path.join(ROOT, "public");
+// อ่านครั้งเดียวตอนเปิด — โค้ดใหม่จาก git pull มีผลหลังเปิดโปรแกรมใหม่อยู่แล้ว
+const VERSION = appVersion(ROOT);
 const HOST = "127.0.0.1";
 const MAX_UPLOAD = 8 * 1024 ** 3;
 const VIDEO_EXT = new Set([".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"]);
@@ -344,6 +347,7 @@ async function toolStatus() {
     whisperModel: setup.whisper.modelName || "",
     gemini: geminiStatus(),
     setupReady: setup.ffmpeg.ready && setup.whisper.ready,
+    version: VERSION,
   };
 }
 
@@ -621,7 +625,7 @@ let port = Number(process.env.SUB360_PORT || 4360);
 while (!(await portFree(port))) port += 1;
 server.listen(port, HOST, () => {
   const address = `http://${HOST}:${port}`;
-  console.log(`\n  Sub360 พร้อมใช้งานที่ ${address}\n  (ปิดหน้าต่างนี้เพื่อหยุดโปรแกรม)\n`);
+  console.log(`\n  Sub360 ${VERSION.label} พร้อมใช้งานที่ ${address}\n  (ปิดหน้าต่างนี้เพื่อหยุดโปรแกรม)\n`);
   if (process.argv.includes("--open") && process.env.SUB360_NO_OPEN !== "1") {
     const opener = process.platform === "win32" ? ["cmd", ["/c", "start", "", address]]
       : process.platform === "darwin" ? ["open", [address]] : ["xdg-open", [address]];

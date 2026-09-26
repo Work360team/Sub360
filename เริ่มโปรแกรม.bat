@@ -12,6 +12,14 @@ cd /d "%~dp0"
 where node >nul 2>nul
 if errorlevel 1 goto node_missing
 
+rem Update to the latest version with git pull (scripts\update.mjs), then start.
+rem Exit code 3 means new code was pulled: this file may have been rewritten while
+rem cmd.exe is still reading it, so restart it from the top on the SAME line
+rem (cmd parses the whole line before running it). "--updated" stops a loop.
+if /i "%~1"=="--updated" goto preflight
+node scripts\update.mjs & if errorlevel 3 "%~f0" --updated
+
+:preflight
 node scripts\preflight.mjs
 if errorlevel 1 goto failed
 
