@@ -8,3 +8,4 @@ samples/*.mp4
 samples/*.mov
 .DS_Store
 Thumbs.db
+dist/

@@ -1,9 +1,12 @@
 {
   "name": "sub360",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Sub360 — ถอดเสียงวิดีโอและใส่ซับไทยสวย ๆ บนเครื่องของคุณเอง",
+  "author": "Work360team",
+  "homepage": "https://github.com/Work360team/Sub360",
   "private": true,
   "type": "module",
+  "main": "electron/main.cjs",
   "engines": {
     "node": ">=22.13.0"
   },
@@ -11,9 +14,66 @@
     "sub": "node scripts/sub-cli.mjs",
     "test": "node --test tests/*.test.mjs",
     "start": "node server/index.mjs --open",
-    "dev": "node --watch server/index.mjs"
+    "dev": "node --watch server/index.mjs",
+    "app": "electron .",
+    "dist": "electron-builder --win --publish never"
   },
   "dependencies": {
+    "electron-updater": "6.8.9",
     "hyperframes": "0.7.106"
+  },
+  "devDependencies": {
+    "electron": "44.4.5",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.work360.sub360",
+    "productName": "Sub360",
+    "executableName": "Sub360",
+    "artifactName": "Sub360-Setup-${version}.${ext}",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "server/**/*",
+      "pipeline/**/*",
+      "public/**/*",
+      "installer/sub360.ico",
+      "package.json",
+      "!node_modules/onnxruntime-node/bin/napi-v*/darwin/**",
+      "!node_modules/onnxruntime-node/bin/napi-v*/linux/**",
+      "!node_modules/onnxruntime-node/bin/napi-v*/win32/arm64/**"
+    ],
+    "asar": false,
+    "npmRebuild": false,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "installer/sub360.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Sub360",
+      "deleteAppDataOnUninstall": false
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Work360team",
+        "repo": "Sub360",
+        "releaseType": "release"
+      }
+    ]
   }
 }

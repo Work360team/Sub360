@@ -186,8 +186,17 @@ export function cancelInstall(name) {
 
 /* ---------- FFmpeg ---------- */
 
+/**
+ * โฟลเดอร์ที่เขียนได้ (data/, .env) — ปกติคือโฟลเดอร์โปรแกรมเอง แต่แอป Windows ติดตั้งโค้ดไว้ในที่
+ * ที่ไม่ควรเขียนทับ (อัปเดตแล้วหาย) จึงส่ง SUB360_HOME มาชี้ไปที่ %LOCALAPPDATA%\Sub360 แทน
+ * ส่วนไฟล์ที่มากับโค้ด (pipeline/fonts, node_modules) ยังอ่านจาก root เหมือนเดิม
+ */
+export function homeDir(root) {
+  return process.env.SUB360_HOME ? path.resolve(process.env.SUB360_HOME) : root;
+}
+
 function binDir(root) {
-  return path.join(root, "data", "bin");
+  return path.join(homeDir(root), "data", "bin");
 }
 
 /** ให้โปรแกรมลูก (HyperFrames) หา ffmpeg ที่เราติดตั้งเจอด้วย ไม่ใช่แค่ pipeline ของเราเอง */
@@ -402,14 +411,14 @@ export async function setupStatus(root, { refresh = false } = {}) {
     const fonts = fs.existsSync(fontDir) ? fs.readdirSync(fontDir).filter((f) => /^Kanit.*\.ttf$/i.test(f)) : [];
     let storageOk = false;
     try {
-      const dir = path.join(root, "data", "projects");
+      const dir = path.join(homeDir(root), "data", "projects");
       fs.mkdirSync(dir, { recursive: true });
       fs.accessSync(dir, fs.constants.W_OK);
       storageOk = true;
     } catch { /* แสดงเป็นยังไม่พร้อม */ }
     statusCache = {
       node: { version: process.versions.node, ready: major > 22 || (major === 22 && minor >= 13) },
-      storage: { path: path.join(root, "data"), ready: storageOk },
+      storage: { path: path.join(homeDir(root), "data"), ready: storageOk },
       fonts: { files: fonts, ready: fonts.length >= 3 },
       hyperframes: { ready: fs.existsSync(path.join(root, "node_modules", "hyperframes", "package.json")) },
       ffmpeg,

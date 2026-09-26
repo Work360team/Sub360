@@ -11,7 +11,22 @@
 
 ต่อยอดจากระบบซับของ Clip360 (ClipPang): ใช้ตัวตัดคำไทย สไตล์ซับ 15 แบบ ชุดสี 8 ชุด ซับแบบเร็ว (FFmpeg/libass) และซับพรีเมียม (HyperFrames) ชุดเดียวกัน
 
-## ติดตั้ง (Windows 10/11 — ไม่ต้องมีอะไรในเครื่องก่อน)
+## ติดตั้ง (Windows 10/11)
+
+ดาวน์โหลด **`Sub360-Setup-x.y.z.exe`** จาก [Releases ล่าสุด](https://github.com/Work360team/Sub360/releases/latest) แล้วดับเบิลคลิก
+ติดตั้งเสร็จจะเปิดแอปให้เอง มีไอคอน Sub360 บน Desktop และ Start menu และแอปจะอัปเดตตัวเองเมื่อมีเวอร์ชันใหม่
+(ไฟล์ยังไม่ได้เซ็นชื่อดิจิทัล ครั้งแรก Windows จะขึ้น "Windows protected your PC" → กด **More info** → **Run anyway**)
+
+แอปเก็บงานและการตั้งค่าที่ `%LOCALAPPDATA%\Sub360` (ถ้าเคยใช้ตัวติดตั้งแบบเก่า จะย้าย `app\data` และ `.env` มาให้เองตอนเปิดครั้งแรก)
+และเขียน log ไว้ที่ `%LOCALAPPDATA%\Sub360\logs`
+
+### ออกเวอร์ชันใหม่ของแอป
+
+ขยับ `version` ใน `package.json` แล้ว merge เข้า `main` — GitHub Actions ([`windows-app.yml`](.github/workflows/windows-app.yml))
+จะสร้างไฟล์ติดตั้งบน Windows เปิดแอปทดสอบ (`--smoke-test`) แล้วออก Release `v<version>` ให้เอง แอปที่ติดตั้งไว้จะเห็นและอัปเดตตัวเอง
+ทุก PR ก็สร้างและทดสอบเหมือนกัน (ดาวน์โหลดไฟล์ติดตั้งไปลองได้จากหน้า Actions) · รันแอปจากโค้ดในเครื่อง: `npm run app` · สร้างไฟล์ติดตั้งเอง: `npm run dist`
+
+### ติดตั้งแบบไม่ใช้ไฟล์ .exe (ทางเลือก)
 
 กด <kbd>Win</kbd>+<kbd>R</kbd> วางบรรทัดนี้ แล้วกด Enter:
 

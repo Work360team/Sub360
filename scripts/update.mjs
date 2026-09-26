@@ -60,7 +60,7 @@ const changed = git(ROOT, ["diff", "--name-only", oldHead, newHead]).out.split(/
 if (changed.some((file) => file === "package.json" || file === "package-lock.json")) {
   console.log("  กำลังติดตั้งส่วนประกอบรุ่นใหม่...\n");
   // npm บนวินโดวส์เป็นไฟล์ .cmd ต้องเรียกผ่าน shell — อาร์กิวเมนต์เป็นค่าคงที่ จึงไม่มีอะไรให้แทรก
-  const res = spawnSync("npm", ["install", "--no-fund", "--no-audit"], { cwd: ROOT, stdio: "inherit", shell: true });
+  const res = spawnSync("npm", ["install", "--omit=dev", "--no-fund", "--no-audit"], { cwd: ROOT, stdio: "inherit", shell: true });
   if (res.status !== 0) warn("ติดตั้งส่วนประกอบรุ่นใหม่ไม่สำเร็จ — ลองปิดแล้วเปิดโปรแกรมใหม่อีกครั้ง");
 }
 

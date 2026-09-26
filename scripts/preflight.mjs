@@ -34,7 +34,7 @@ ok(`Node.js ${process.versions.node}`);
 if (!fs.existsSync(path.join(ROOT, "node_modules", "hyperframes", "package.json"))) {
   console.log("  กำลังติดตั้งส่วนประกอบครั้งแรก (ใช้เวลาสักครู่)...\n");
   // npm บนวินโดวส์เป็นไฟล์ .cmd ต้องเรียกผ่าน shell — อาร์กิวเมนต์เป็นค่าคงที่ จึงไม่มีอะไรให้แทรก
-  const res = spawnSync("npm", ["install", "--no-fund", "--no-audit"], { cwd: ROOT, stdio: "inherit", shell: true });
+  const res = spawnSync("npm", ["install", "--omit=dev", "--no-fund", "--no-audit"], { cwd: ROOT, stdio: "inherit", shell: true });
   if (res.status !== 0) warn("ติดตั้งส่วนประกอบไม่สำเร็จ — สไตล์พรีเมียมจะใช้ไม่ได้ แต่สไตล์แบบเร็วยังใช้ได้");
   else ok("ติดตั้งส่วนประกอบแล้ว");
 } else {
