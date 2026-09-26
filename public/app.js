@@ -566,6 +566,11 @@ async function refreshStatus() {
     ].filter(Boolean).join(" · ")}${ok ? " พร้อมแล้ว" : " — ดูหน้าตั้งค่า"}</small></div>`;
     chip.className = `engine-chip ${ok ? "ok" : "warn"}`;
     chip.innerHTML = `${icon("radio", "i-sm")}<span>LOCAL ${ok ? "เชื่อมต่อแล้ว" : "ตั้งค่าไม่ครบ"}</span>`;
+    if (s.version) {
+      const v = $("#app-version");
+      v.textContent = `Sub360 v${s.version.version}${s.version.commit ? ` · ${s.version.commit}` : ""}`;
+      v.title = s.version.date ? `อัปเดตล่าสุด ${s.version.date}` : "";
+    }
   } catch {
     card.className = "system-ready warn";
     card.innerHTML = `<span class="status-orbit"><span></span></span><div><b>ติดต่อเซิร์ฟเวอร์ไม่ได้</b><small>เปิดโปรแกรมด้วย เริ่มโปรแกรม.bat</small></div>`;

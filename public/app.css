@@ -112,6 +112,8 @@ i[data-icon] svg { width: 100%; height: 100%; }
 .system-ready small { margin-top: 3px; color: #737b74; font-size: 12px; line-height: 1.45; }
 .help-link { display: flex; align-items: center; gap: 8px; padding: 8px 10px; color: #727a73; font-size: 12px; }
 .help-link:hover { color: #d7dbd5; }
+.app-version { padding: 0 10px; color: #535a54; font-size: 11px; font-variant-numeric: tabular-nums; }
+.app-version:empty { display: none; }
 .sidebar-scrim { display: none; }
 
 /* ---------- เนื้อหา + topbar ---------- */
