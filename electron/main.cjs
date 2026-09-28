@@ -5,7 +5,7 @@
 //
 // โค้ดของแอปอยู่ในโฟลเดอร์ติดตั้ง (อัปเดตแล้วถูกแทนที่ทั้งโฟลเดอร์) ส่วนงานและการตั้งค่าอยู่ที่
 // %LOCALAPPDATA%\Sub360 (SUB360_HOME) — ที่เดียวกับที่ตัวติดตั้งแบบเก่าใช้ จึงย้ายงานเดิมมาได้ง่าย
-const { app, BrowserWindow, dialog, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const { fork, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -121,7 +121,7 @@ function createWindow() {
     backgroundColor: "#f5f4ef",
     autoHideMenuBar: true,
     show: false,
-    webPreferences: { contextIsolation: true, sandbox: true },
+    webPreferences: { contextIsolation: true, sandbox: true, preload: path.join(__dirname, "preload.cjs") },
   });
   win.removeMenu();
   win.once("ready-to-show", () => win.show());
@@ -160,29 +160,132 @@ function createWindow() {
 }
 
 /* ---------- อัปเดตอัตโนมัติ (GitHub Releases) ---------- */
+// ผู้ใช้ต้องเห็นทุกช่วง: พบเวอร์ชันใหม่ → ดาวน์โหลดกี่ % → พร้อมติดตั้ง → ตัวติดตั้งทำงาน → เปิดมาแล้วบอกว่าเสร็จ
+// สถานะเก็บไว้ที่นี่ที่เดียว หน้าเว็บขอและฟังผ่าน preload.cjs ส่วนแถบบน taskbar ก็อ่านจากที่นี่
+//
+// state: idle · checking · not-available · available · downloading · downloaded · installing · error
+// manual = ผู้ใช้กดตรวจเองจากหน้าตั้งค่า (ตรวจเบื้องหลังแล้วไม่เจอ/เน็ตหลุด ไม่ต้องรบกวนผู้ใช้)
+
+let updater = null;
+let updateState = { state: "idle" };
+let manualCheck = false;
+let promptedVersion = "";
+let justUpdated = null;
+
+// เปิดครั้งแรกหลังอัปเดตหรือยัง — เทียบกับเวอร์ชันที่จดไว้ตอนเปิดครั้งก่อน
+// ต้องเรียกก่อนเขียน log ใด ๆ: รุ่นก่อน 0.4.2 ยังไม่ได้จดเวอร์ชันไว้ ถ้ามี app.log อยู่แล้วแปลว่าเคยเปิดรุ่นเก่ามาก่อน
+function detectJustUpdated() {
+  const file = path.join(HOME, "app-version.txt");
+  let previous = null;
+  try { previous = fs.readFileSync(file, "utf8").trim(); } catch {
+    if (fs.existsSync(path.join(LOG_DIR, "app.log"))) previous = "";
+  }
+  try { fs.writeFileSync(file, app.getVersion()); } catch { /* จดไม่ได้ก็แค่ไม่ได้แจ้งครั้งหน้า */ }
+  if (previous === null || previous === app.getVersion()) return null;
+  log(`updated ${previous || "(older)"} -> ${app.getVersion()}`);
+  return { from: previous };
+}
+
+function setUpdateState(next) {
+  updateState = next;
+  if (!win || win.isDestroyed()) return;
+  // แถบความคืบหน้าบนไอคอน taskbar — เห็นได้แม้ย่อหน้าต่างไว้ (มากกว่า 1 = วิ่งไปมาแบบยังไม่รู้ขนาด)
+  const bar = { available: 2, downloading: Math.max(0.01, (next.percent || 0) / 100), installing: 2 }[next.state];
+  win.setProgressBar(bar ?? -1);
+  win.webContents.send("sub360:update", publicUpdateState());
+}
+
+function publicUpdateState() {
+  return { ...updateState, enabled: Boolean(updater), current: app.getVersion(), justUpdated };
+}
+
+function checkForUpdates(manual = false) {
+  if (!updater) return publicUpdateState();
+  if (updateState.state === "checking") {
+    manualCheck ||= manual;
+    return publicUpdateState();
+  }
+  // พบแล้ว/กำลังโหลด/โหลดเสร็จแล้ว ไม่ต้องตรวจซ้ำ — ตรวจซ้ำตอนโหลดเสร็จแล้ว electron-updater จะแจ้งว่าโหลดเสร็จอีกรอบ
+  if (["available", "downloading", "downloaded", "installing"].includes(updateState.state)) return publicUpdateState();
+  manualCheck = manual;
+  updater.checkForUpdates().catch((error) => log(`update check failed: ${error}`));
+  return publicUpdateState();
+}
+
+async function installUpdate() {
+  if (!updater || updateState.state !== "downloaded") return false;
+  if (await serverBusy()) {
+    const { response } = await dialog.showMessageBox(win, {
+      type: "warning",
+      buttons: ["อัปเดตเลย", "ยกเลิก"],
+      defaultId: 1,
+      cancelId: 1,
+      title: "Sub360",
+      message: "ยังมีงานทำอยู่",
+      detail: "ถ้าอัปเดตตอนนี้ งานที่กำลังถอดเสียงหรือเรนเดอร์จะหยุดกลางทาง และต้องสั่งใหม่ภายหลัง",
+    });
+    if (response !== 0) return false;
+  }
+  setUpdateState({ ...updateState, state: "installing" });
+  quitting = true;
+  // ไม่ใช้โหมดเงียบ (/S) — ตัวติดตั้งจะขึ้นหน้าต่างแถบวิ่ง "Installing, please wait..." ให้เห็นว่ากำลังทำงาน
+  // แล้วเปิด Sub360 ให้เองเมื่อเสร็จ (โหมดเงียบทำให้หน้าต่างหายไปเฉย ๆ ผู้ใช้นึกว่าโปรแกรมพังแล้วกดเปิดซ้ำ)
+  // หน่วงนิดหนึ่งให้หน้าเว็บทันแสดงว่ากำลังปิดเพื่อติดตั้ง
+  setTimeout(() => updater.quitAndInstall(false, true), 900);
+  return true;
+}
+
+async function promptInstall(version) {
+  if (promptedVersion === version) return;
+  promptedVersion = version;
+  if (!win.isFocused()) win.flashFrame(true);
+  const { response } = await dialog.showMessageBox(win, {
+    type: "info",
+    buttons: ["เปิดใหม่เพื่ออัปเดต", "ไว้ทีหลัง"],
+    defaultId: 0,
+    cancelId: 1,
+    title: "Sub360",
+    message: `Sub360 เวอร์ชัน ${version} ดาวน์โหลดเสร็จแล้ว พร้อมติดตั้ง`,
+    detail: "กด เปิดใหม่เพื่ออัปเดต แล้วโปรแกรมจะปิดไปสักครู่ระหว่างติดตั้ง (มีหน้าต่างแสดงความคืบหน้า) และเปิดขึ้นมาเองเมื่อเสร็จ\n\nหรือเลือก ไว้ทีหลัง แล้วระบบจะติดตั้งให้เองตอนปิดโปรแกรม — เปิดครั้งถัดไปจะเป็นเวอร์ชันใหม่",
+  });
+  if (response === 0) installUpdate();
+}
+
+function setupUpdateBridge() {
+  // รับคำสั่งเฉพาะจากหน้าของ local server เรา ไม่รับจากหน้าอื่น
+  const fromApp = (event) => Boolean(baseUrl && event.senderFrame?.url?.startsWith(`${baseUrl}/`));
+  ipcMain.handle("sub360:update-state", () => publicUpdateState());
+  ipcMain.handle("sub360:update-check", (event) => (fromApp(event) ? checkForUpdates(true) : null));
+  ipcMain.handle("sub360:update-install", (event) => (fromApp(event) ? installUpdate() : false));
+}
 
 function setupUpdates() {
   if (!app.isPackaged || SMOKE_TEST) return;
   const { autoUpdater } = require("electron-updater");
+  updater = autoUpdater;
   autoUpdater.logger = { info: log, warn: log, error: log, debug() {} };
-  autoUpdater.on("update-downloaded", async (info) => {
-    const { response } = await dialog.showMessageBox(win, {
-      type: "info",
-      buttons: ["เปิดใหม่เพื่ออัปเดต", "ไว้ทีหลัง"],
-      defaultId: 0,
-      cancelId: 1,
-      title: "Sub360",
-      message: `Sub360 เวอร์ชัน ${info.version} พร้อมติดตั้งแล้ว`,
-      detail: "กด เปิดใหม่เพื่ออัปเดต เพื่อใช้เวอร์ชันใหม่ตอนนี้ หรือเลือก ไว้ทีหลัง แล้วระบบจะอัปเดตให้เองตอนปิดโปรแกรมครั้งถัดไป",
-    });
-    if (response !== 0) return;
-    quitting = true;
-    autoUpdater.quitAndInstall(true, true);
+  autoUpdater.on("checking-for-update", () => setUpdateState({ state: "checking", manual: manualCheck }));
+  autoUpdater.on("update-not-available", () => setUpdateState({ state: "not-available", manual: manualCheck, checkedAt: Date.now() }));
+  autoUpdater.on("update-available", (info) => setUpdateState({ state: "available", version: info.version }));
+  autoUpdater.on("download-progress", (p) => setUpdateState({
+    state: "downloading",
+    version: updateState.version,
+    percent: p.percent,
+    transferred: p.transferred,
+    total: p.total,
+    bytesPerSecond: p.bytesPerSecond,
+  }));
+  autoUpdater.on("update-downloaded", (info) => {
+    setUpdateState({ state: "downloaded", version: info.version });
+    promptInstall(info.version);
   });
-  autoUpdater.on("error", (error) => log(`update error: ${error?.stack || error}`));
-  const check = () => autoUpdater.checkForUpdates().catch((error) => log(`update check failed: ${error}`));
-  check();
-  setInterval(check, 6 * 60 * 60 * 1000);
+  autoUpdater.on("error", (error) => {
+    log(`update error: ${error?.stack || error}`);
+    // version มีค่า = พังระหว่างดาวน์โหลด ผู้ใช้เห็นแถบ % ไปแล้ว ต้องบอกว่าไม่สำเร็จ
+    setUpdateState({ state: "error", manual: manualCheck, version: updateState.version, message: String(error?.message || error).split("\n")[0] });
+  });
+  checkForUpdates();
+  setInterval(() => checkForUpdates(), 6 * 60 * 60 * 1000);
 }
 
 /* ---------- smoke test (CI บน Windows): เปิด server → เรียก /api/status → ปิด ---------- */
@@ -223,7 +326,9 @@ if (!SMOKE_TEST && !app.requestSingleInstanceLock()) {
   app.whenReady().then(async () => {
     fs.mkdirSync(HOME, { recursive: true });
     if (SMOKE_TEST) return runSmokeTest();
+    justUpdated = detectJustUpdated();
     migrateLegacyInstall();
+    setupUpdateBridge();
     createWindow();
     try {
       const ready = await startServer();
