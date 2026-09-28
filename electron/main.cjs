@@ -160,8 +160,13 @@ function createWindow() {
 }
 
 /* ---------- อัปเดตอัตโนมัติ (GitHub Releases) ---------- */
-// ผู้ใช้ต้องเห็นทุกช่วง: พบเวอร์ชันใหม่ → ดาวน์โหลดกี่ % → พร้อมติดตั้ง → ตัวติดตั้งทำงาน → เปิดมาแล้วบอกว่าเสร็จ
-// สถานะเก็บไว้ที่นี่ที่เดียว หน้าเว็บขอและฟังผ่าน preload.cjs ส่วนแถบบน taskbar ก็อ่านจากที่นี่
+// ผู้ใช้ต้องเห็นเสมอว่าอัปเดตถึงไหน ไม่ต้องเดา (แบบเดียวกับ Clip360):
+//   โหลดอยู่     → การ์ดมุมขวาล่างบอกกี่ % และกี่ MB + แถบบน taskbar
+//   โหลดเสร็จ    → การ์ดมีปุ่ม อัปเดตเลย / ไว้ทีหลัง (และถามด้วยกล่องข้อความหนึ่งครั้ง)
+//   กำลังติดตั้ง  → หน้าต่างสถานะ 3 ขั้น แล้วตัวติดตั้งแสดงแถบของมันเอง (ไม่ติดตั้งแบบเงียบ)
+//   เปิดใหม่     → การ์ดบอกว่าอัปเดตเป็นเวอร์ชันไหนแล้ว
+// เลือก "ไว้ทีหลัง" แล้วปิดโปรแกรม ก็ติดตั้งทางเดียวกัน ไม่ติดตั้งเงียบ ๆ อยู่เบื้องหลัง
+// สถานะเก็บไว้ที่นี่ที่เดียว หน้าเว็บขอและฟังผ่าน preload.cjs
 //
 // state: idle · checking · not-available · available · downloading · downloaded · installing · error
 // manual = ผู้ใช้กดตรวจเองจากหน้าตั้งค่า (ตรวจเบื้องหลังแล้วไม่เจอ/เน็ตหลุด ไม่ต้องรบกวนผู้ใช้)
@@ -171,6 +176,7 @@ let updateState = { state: "idle" };
 let manualCheck = false;
 let promptedVersion = "";
 let justUpdated = null;
+let installing = false;
 
 // เปิดครั้งแรกหลังอัปเดตหรือยัง — เทียบกับเวอร์ชันที่จดไว้ตอนเปิดครั้งก่อน
 // ต้องเรียกก่อนเขียน log ใด ๆ: รุ่นก่อน 0.4.2 ยังไม่ได้จดเวอร์ชันไว้ ถ้ามี app.log อยู่แล้วแปลว่าเคยเปิดรุ่นเก่ามาก่อน
@@ -212,26 +218,80 @@ function checkForUpdates(manual = false) {
   return publicUpdateState();
 }
 
-async function installUpdate() {
-  if (!updater || updateState.state !== "downloaded") return false;
-  if (await serverBusy()) {
+const UPDATE_PAGE = (version) => `<!doctype html><meta charset="utf-8"><title>กำลังอัปเดต Sub360</title>
+<style>
+body{margin:0;height:100vh;display:grid;place-items:center;background:#1a1e1a;color:#f5f4ef;font:15px 'Leelawadee UI',Tahoma,sans-serif}
+.box{width:380px}h1{font-size:19px;margin:0 0 4px}p{margin:0 0 16px;color:#aab1a9}
+ol{list-style:none;margin:0;padding:0}li{display:flex;gap:10px;align-items:center;padding:6px 0;color:#7c847b}
+li i{width:18px;height:18px;border-radius:50%;border:2px solid #5f675f;flex:none;box-sizing:border-box}
+li.now{color:#f5f4ef}li.now i{border-color:#ffd23f;border-top-color:transparent;animation:s 0.9s linear infinite}
+li.done{color:#aab1a9}li.done i{background:#3a9a68;border-color:#3a9a68}
+@keyframes s{to{transform:rotate(360deg)}}
+</style>
+<div class="box"><h1>กำลังอัปเดตเป็นเวอร์ชัน ${version}</h1><p>ไม่ต้องทำอะไร Sub360 จะเปิดขึ้นมาเองเมื่อเสร็จ</p>
+<ol><li id="s1" class="now"><i></i>ปิดงานที่ค้างอยู่ให้เรียบร้อย</li>
+<li id="s2"><i></i>ติดตั้งเวอร์ชันใหม่ (มีหน้าต่างแสดงความคืบหน้า)</li>
+<li id="s3"><i></i>เปิด Sub360 ใหม่</li></ol></div>`;
+
+function openUpdateWindow(version) {
+  const status = new BrowserWindow({
+    width: 460,
+    height: 260,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    alwaysOnTop: true,
+    title: "กำลังอัปเดต Sub360",
+    icon: ICON,
+    backgroundColor: "#1a1e1a",
+    autoHideMenuBar: true,
+    webPreferences: { contextIsolation: true, sandbox: true },
+  });
+  status.removeMenu();
+  const loaded = status.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(UPDATE_PAGE(version))}`).catch(() => {});
+  return {
+    step(done, now) {
+      loaded.then(() => {
+        if (status.isDestroyed()) return;
+        return status.webContents.executeJavaScript(
+          `document.getElementById(${JSON.stringify(done)}).className="done";`
+          + `document.getElementById(${JSON.stringify(now)}).className="now";`,
+        );
+      }).catch(() => {});
+    },
+  };
+}
+
+/**
+ * ติดตั้งเวอร์ชันที่โหลดไว้ — ทางเดียวที่ใช้ทั้งปุ่มในการ์ด กล่องข้อความ และตอนปิดโปรแกรม
+ * @param {boolean} askIfBusy ถามก่อนถ้ายังมีงานค้าง (ตอนปิดโปรแกรม หน้าต่างถามไปแล้ว)
+ */
+async function installUpdate({ askIfBusy = true } = {}) {
+  if (!updater || installing || updateState.state !== "downloaded") return false;
+  const { version } = updateState;
+  if (askIfBusy && await serverBusy()) {
     const { response } = await dialog.showMessageBox(win, {
       type: "warning",
-      buttons: ["อัปเดตเลย", "ยกเลิก"],
+      buttons: ["อัปเดตเลย", "รอให้เสร็จก่อน"],
       defaultId: 1,
       cancelId: 1,
       title: "Sub360",
       message: "ยังมีงานทำอยู่",
-      detail: "ถ้าอัปเดตตอนนี้ งานที่กำลังถอดเสียงหรือเรนเดอร์จะหยุดกลางทาง และต้องสั่งใหม่ภายหลัง",
+      detail: "ถ้าอัปเดตตอนนี้ งานที่กำลังถอดเสียงหรือเรนเดอร์จะหยุดกลางทาง เลือก รอให้เสร็จก่อน แล้วระบบจะอัปเดตให้ตอนปิดโปรแกรม",
     });
     if (response !== 0) return false;
   }
-  setUpdateState({ ...updateState, state: "installing" });
+  installing = true;
   quitting = true;
-  // ไม่ใช้โหมดเงียบ (/S) — ตัวติดตั้งจะขึ้นหน้าต่างแถบวิ่ง "Installing, please wait..." ให้เห็นว่ากำลังทำงาน
-  // แล้วเปิด Sub360 ให้เองเมื่อเสร็จ (โหมดเงียบทำให้หน้าต่างหายไปเฉย ๆ ผู้ใช้นึกว่าโปรแกรมพังแล้วกดเปิดซ้ำ)
-  // หน่วงนิดหนึ่งให้หน้าเว็บทันแสดงว่ากำลังปิดเพื่อติดตั้ง
-  setTimeout(() => updater.quitAndInstall(false, true), 900);
+  setUpdateState({ ...updateState, state: "installing" });
+  const status = openUpdateWindow(version);
+  if (win && !win.isDestroyed()) win.hide();
+  stopServer();
+  status.step("s1", "s2");
+  log(`installing ${version}`);
+  // ให้เห็นขั้นที่ 2 ก่อนหน้าต่างนี้ปิด แล้วตัวติดตั้งแสดงแถบความคืบหน้าของมันเองต่อ
+  // (ไม่ใช้โหมดเงียบ /S — ผู้ใช้เห็นแอปหายไปเฉย ๆ แล้วนึกว่าโปรแกรมพัง)
+  setTimeout(() => updater.quitAndInstall(false, true), 1500);
   return true;
 }
 
@@ -241,12 +301,13 @@ async function promptInstall(version) {
   if (!win.isFocused()) win.flashFrame(true);
   const { response } = await dialog.showMessageBox(win, {
     type: "info",
-    buttons: ["เปิดใหม่เพื่ออัปเดต", "ไว้ทีหลัง"],
+    buttons: ["อัปเดตเลย", "ไว้ทีหลัง"],
     defaultId: 0,
     cancelId: 1,
     title: "Sub360",
-    message: `Sub360 เวอร์ชัน ${version} ดาวน์โหลดเสร็จแล้ว พร้อมติดตั้ง`,
-    detail: "กด เปิดใหม่เพื่ออัปเดต แล้วโปรแกรมจะปิดไปสักครู่ระหว่างติดตั้ง (มีหน้าต่างแสดงความคืบหน้า) และเปิดขึ้นมาเองเมื่อเสร็จ\n\nหรือเลือก ไว้ทีหลัง แล้วระบบจะติดตั้งให้เองตอนปิดโปรแกรม — เปิดครั้งถัดไปจะเป็นเวอร์ชันใหม่",
+    message: `Sub360 เวอร์ชัน ${version} พร้อมติดตั้งแล้ว`,
+    detail: "กด อัปเดตเลย แล้วรอราว 1 นาที จะมีหน้าต่างบอกความคืบหน้า และ Sub360 จะเปิดขึ้นมาเองเมื่อเสร็จ\n\n"
+      + "ถ้าเลือก ไว้ทีหลัง กดอัปเดตได้จากการ์ดมุมขวาล่าง หรือระบบจะอัปเดตให้ตอนปิดโปรแกรม",
   });
   if (response === 0) installUpdate();
 }
@@ -264,6 +325,8 @@ function setupUpdates() {
   const { autoUpdater } = require("electron-updater");
   updater = autoUpdater;
   autoUpdater.logger = { info: log, warn: log, error: log, debug() {} };
+  // ติดตั้งตอนปิดโปรแกรมเองใน will-quit ด้วยหน้าต่างสถานะ แทนที่ electron-updater จะติดตั้งเงียบ ๆ
+  autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.on("checking-for-update", () => setUpdateState({ state: "checking", manual: manualCheck }));
   autoUpdater.on("update-not-available", () => setUpdateState({ state: "not-available", manual: manualCheck, checkedAt: Date.now() }));
   autoUpdater.on("update-available", (info) => setUpdateState({ state: "available", version: info.version }));
@@ -281,6 +344,12 @@ function setupUpdates() {
   });
   autoUpdater.on("error", (error) => {
     log(`update error: ${error?.stack || error}`);
+    if (installing) {
+      // เปิดตัวติดตั้งไม่ได้ — หน้าต่างหลักถูกซ่อนไปแล้ว บอกแล้วปิดโปรแกรม เปิดใหม่ก็จะลองอัปเดตอีกรอบ
+      dialog.showErrorBox("อัปเดต Sub360 ไม่สำเร็จ", `เปิดโปรแกรมใหม่อีกครั้งแล้วระบบจะลองอัปเดตให้อีกรอบ\n\nรายละเอียด: ${path.join(LOG_DIR, "app.log")}`);
+      app.exit(1);
+      return;
+    }
     // version มีค่า = พังระหว่างดาวน์โหลด ผู้ใช้เห็นแถบ % ไปแล้ว ต้องบอกว่าไม่สำเร็จ
     setUpdateState({ state: "error", manual: manualCheck, version: updateState.version, message: String(error?.message || error).split("\n")[0] });
   });
@@ -346,5 +415,11 @@ if (!SMOKE_TEST && !app.requestSingleInstanceLock()) {
   });
 
   app.on("window-all-closed", () => app.quit());
-  app.on("will-quit", stopServer);
+  app.on("will-quit", (event) => {
+    stopServer();
+    // เลือก "ไว้ทีหลัง" ไว้ — ติดตั้งตอนนี้ แต่ให้เห็นความคืบหน้า ไม่ใช่ติดตั้งเงียบ ๆ หลังปิดหน้าต่าง
+    if (installing || updateState.state !== "downloaded") return;
+    event.preventDefault();
+    installUpdate({ askIfBusy: false });
+  });
 }
