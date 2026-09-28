@@ -2347,11 +2347,11 @@ function updateView(u) {
     case "downloaded":
       return {
         key: `ready:${u.version}`, card: true, tone: "ok", pill: ["green", "พร้อมติดตั้ง"], icon: "check", title: `${v} พร้อมติดตั้งแล้ว`,
-        text: "กดอัปเดตเลย โปรแกรมจะปิดสักครู่แล้วเปิดขึ้นมาเอง — หรือปล่อยไว้ ระบบจะติดตั้งให้ตอนปิดโปรแกรม",
-        action: { id: "install", label: "อัปเดตเลย", cls: "button-primary" },
+        text: "กด อัปเดตเลย แล้วรอราว 1 นาที Sub360 จะปิดแล้วเปิดใหม่เอง — ถ้ายังไม่สะดวก ระบบจะอัปเดตให้ตอนปิดโปรแกรม",
+        action: { id: "install", label: "อัปเดตเลย", cls: "button-primary" }, later: true,
       };
     case "installing":
-      return { key: "installing", card: true, closable: false, spinner: true, pill: ["yellow", "กำลังติดตั้ง"], title: "กำลังปิดเพื่อติดตั้งอัปเดต…", text: "มีหน้าต่างติดตั้งขึ้นมาสักครู่ พอเสร็จแล้ว Sub360 จะเปิดขึ้นมาเองอีกครั้ง" };
+      return { key: "installing", card: true, closable: false, spinner: true, pill: ["yellow", "กำลังติดตั้ง"], title: "กำลังปิดเพื่อติดตั้งอัปเดต…", text: "ดูความคืบหน้าในหน้าต่าง กำลังอัปเดต แล้ว Sub360 จะเปิดขึ้นมาเองเมื่อเสร็จ" };
     case "error":
       // ไม่มี version = ตรวจเบื้องหลังแล้วเน็ตหลุด ไม่ต้องขึ้นการ์ดรบกวน (หน้าตั้งค่ายังบอกอยู่)
       return {
@@ -2415,7 +2415,7 @@ function renderUpdateCard() {
       <b class="update-title">${esc(w.title)}</b>
       <small class="update-text">${esc(w.text)}</small>
       ${updateProgress(w)}
-      ${w.action ? `<div class="update-actions">${updateAction(w.action)}</div>` : ""}
+      ${w.action ? `<div class="update-actions">${updateAction(w.action)}${w.later ? updateAction({ id: "hide", label: "ไว้ทีหลัง", cls: "button-ghost-dark" }) : ""}</div>` : ""}
     </div>
     ${w.closable === false ? "" : `<button class="update-close" data-update="hide" aria-label="ซ่อน" title="ซ่อน">${icon("x")}</button>`}`);
   if (!fresh) return;
