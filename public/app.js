@@ -2278,10 +2278,15 @@ async function pageSettings() {
       </section>
     </div>
     <section class="panel" style="padding:21px">
+      <div class="section-heading"><div><h2>อัปเดตโปรแกรม</h2><p>ตรวจหาเวอร์ชันใหม่ให้เองทุกครั้งที่เปิด ดาวน์โหลดเบื้องหลัง แล้วบอกเมื่อพร้อมติดตั้ง</p></div><span class="quick-icon yellow">${icon("download")}</span></div>
+      <div class="update-status" id="update-status"></div>
+    </section>
+    <section class="panel" style="padding:21px">
       <div class="section-heading"><div><h2>ไฟล์อยู่ที่ไหน</h2></div><span class="quick-icon green">${icon("folder")}</span></div>
       <p class="muted" style="font-size:13px;line-height:1.75">ทุกโปรเจกต์อยู่ในโฟลเดอร์ <code>data/projects/&lt;รหัส&gt;/</code> ของ Sub360 — วิดีโอต้นฉบับ, <code>project.json</code> (ซับที่แก้ คำแปล และการตั้งค่า) และโฟลเดอร์ <code>out/</code> (MP4, SRT, ASS, VTT, TXT) ลบโปรเจกต์จากในแอปจะลบโฟลเดอร์นั้นทั้งหมด</p>
     </section>
   </div>`;
+  renderUpdatePanel();
   $("#recheck").addEventListener("click", () => { statusCache = null; route(); });
   $("#key-save").addEventListener("click", async () => {
     const key = $("#key").value.trim();
@@ -2307,9 +2312,187 @@ async function pageSettings() {
   });
 }
 
+/* ---------- อัปเดตโปรแกรม ---------- */
+// แอป Windows ตรวจและดาวน์โหลดเวอร์ชันใหม่เองอยู่เบื้องหลัง (electron/main.cjs) — ส่วนนี้ทำให้ผู้ใช้เห็นว่าถึงไหนแล้ว
+// การ์ดมุมขวาล่าง: ดาวน์โหลดกี่ % · พร้อมติดตั้ง · กำลังติดตั้ง · อัปเดตเสร็จแล้ว ส่วนหน้าตั้งค่ามีสถานะเต็มพร้อมปุ่มตรวจเอง
+// เปิดผ่านเบราว์เซอร์ (เริ่มโปรแกรม.bat) จะไม่มี window.sub360App — แบบนั้นอัปเดตด้วย git pull ตอนเปิดโปรแกรม
+const desktop = window.sub360App || null;
+let update = null;
+let updateHidden = ""; // key ของการ์ดที่ผู้ใช้กดซ่อนไป — ขึ้นใหม่เมื่อสถานะเปลี่ยน
+let updatedNoticeDone = false; // การ์ด "อัปเดตเสร็จแล้ว" ขึ้นครั้งเดียวพอ
+let updatedTimer = 0;
+
+function updateView(u) {
+  const v = u.version ? `v${u.version}` : "เวอร์ชันใหม่";
+  switch (u.state) {
+    case "checking":
+      return { key: "checking", pill: ["", "กำลังตรวจ…"], icon: "refresh", title: "กำลังตรวจหาเวอร์ชันใหม่…", text: "ใช้เวลาไม่กี่วินาที" };
+    case "not-available":
+      return {
+        key: "latest", pill: ["green", "ล่าสุดแล้ว"], icon: "check", title: `v${u.current} เป็นเวอร์ชันล่าสุด`,
+        text: `ตรวจล่าสุดเมื่อ ${new Date(u.checkedAt).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })} น.`,
+        action: { id: "check", label: "ตรวจอีกครั้ง" },
+      };
+    case "available":
+      return { key: `dl:${u.version}`, card: true, pill: ["yellow", "กำลังดาวน์โหลด"], icon: "download", title: `พบ Sub360 ${v} · เริ่มดาวน์โหลด`, text: "ดาวน์โหลดอยู่เบื้องหลัง ใช้งานต่อได้ตามปกติ", progress: -1 };
+    case "downloading": {
+      const pct = clamp(Math.floor(u.percent || 0), 0, 100);
+      const left = u.bytesPerSecond > 0 ? ((u.total - u.transferred) / u.bytesPerSecond) * 1000 : 0;
+      return {
+        key: `dl:${u.version}`, card: true, pill: ["yellow", "กำลังดาวน์โหลด"], icon: "download", title: `กำลังดาวน์โหลด ${v} · ${pct}%`,
+        text: `${fmtBytes(u.transferred)} จาก ${fmtBytes(u.total)}${left >= 1000 ? ` · เหลืออีกราว ${fmtDuration(left)}` : ""}`,
+        progress: pct,
+      };
+    }
+    case "downloaded":
+      return {
+        key: `ready:${u.version}`, card: true, tone: "ok", pill: ["green", "พร้อมติดตั้ง"], icon: "check", title: `${v} พร้อมติดตั้งแล้ว`,
+        text: "กดอัปเดตเลย โปรแกรมจะปิดสักครู่แล้วเปิดขึ้นมาเอง — หรือปล่อยไว้ ระบบจะติดตั้งให้ตอนปิดโปรแกรม",
+        action: { id: "install", label: "อัปเดตเลย", cls: "button-primary" },
+      };
+    case "installing":
+      return { key: "installing", card: true, closable: false, spinner: true, pill: ["yellow", "กำลังติดตั้ง"], title: "กำลังปิดเพื่อติดตั้งอัปเดต…", text: "มีหน้าต่างติดตั้งขึ้นมาสักครู่ พอเสร็จแล้ว Sub360 จะเปิดขึ้นมาเองอีกครั้ง" };
+    case "error":
+      // ไม่มี version = ตรวจเบื้องหลังแล้วเน็ตหลุด ไม่ต้องขึ้นการ์ดรบกวน (หน้าตั้งค่ายังบอกอยู่)
+      return {
+        key: `error:${u.version || ""}`, card: Boolean(u.version), tone: "error", pill: ["red", "ไม่สำเร็จ"], icon: "alert",
+        title: u.version ? `ดาวน์โหลด ${v} ไม่สำเร็จ` : "ตรวจหาอัปเดตไม่สำเร็จ", text: "ตรวจการเชื่อมต่ออินเทอร์เน็ต แล้วกดลองใหม่", detail: u.message,
+        action: { id: "check", label: "ลองใหม่", cls: "button-primary" },
+      };
+    default:
+      return { key: "idle", pill: ["", "ยังไม่ได้ตรวจ"], icon: "refresh", title: `ใช้ Sub360 v${u.current}`, text: "โปรแกรมตรวจหาเวอร์ชันใหม่ให้เองทุกครั้งที่เปิด", action: { id: "check", label: "ตรวจหาอัปเดต" } };
+  }
+}
+
+// การ์ดมุมขวาล่าง: สถานะที่ผู้ใช้ต้องรู้ หรือ "อัปเดตเสร็จแล้ว" ตอนเปิดครั้งแรกหลังอัปเดต
+function updateCardView(u) {
+  const view = updateView(u);
+  if (view.card) {
+    updatedNoticeDone = true;
+    return view;
+  }
+  if (!u.justUpdated || updatedNoticeDone) return null;
+  return {
+    key: "updated", tone: "ok", icon: "check", title: `อัปเดตเป็น Sub360 v${u.current} เรียบร้อยแล้ว`,
+    text: `${u.justUpdated.from ? `จาก v${u.justUpdated.from} · ` : ""}โปรเจกต์และการตั้งค่าเดิมอยู่ครบ`,
+  };
+}
+
+const updateProgress = (w) => (w.progress === undefined ? "" : `<div class="progress update-progress${w.progress < 0 ? " indeterminate" : ""}"><span style="width:${Math.max(w.progress, 0)}%"></span></div>`);
+const updateAction = (a) => (a ? `<button class="button button-sm ${a.cls || "button-quiet"}" data-update="${a.id}">${esc(a.label)}</button>` : "");
+
+// วาดใหม่ทั้งก้อนเฉพาะตอนสถานะเปลี่ยน — ระหว่างดาวน์โหลดแก้แค่ตัวหนังสือกับความยาวแถบ แถบจะเลื่อนนุ่ม ๆ ไม่กระตุก
+function paintUpdate(host, view, template) {
+  if (host.dataset.key === view.key) {
+    $(".update-title", host).textContent = view.title;
+    $(".update-text", host).textContent = view.text;
+    const bar = $(".update-progress", host);
+    if (bar && view.progress !== undefined) {
+      bar.classList.toggle("indeterminate", view.progress < 0);
+      if (view.progress >= 0) bar.firstElementChild.style.width = `${view.progress}%`;
+    }
+    return false;
+  }
+  host.dataset.key = view.key;
+  host.innerHTML = template(view);
+  return true;
+}
+
+function renderUpdateCard() {
+  const el = $("#update-card");
+  const view = update && updateCardView(update);
+  const show = Boolean(view) && updateHidden !== view.key;
+  document.body.classList.toggle("update-open", show);
+  if (!show) {
+    el.hidden = true;
+    el.dataset.key = "";
+    return;
+  }
+  const appear = el.hidden;
+  const fresh = paintUpdate(el, view, (w) => `
+    <span class="update-icon">${w.spinner ? '<span class="spinner"></span>' : icon(w.icon)}</span>
+    <div class="update-body">
+      <b class="update-title">${esc(w.title)}</b>
+      <small class="update-text">${esc(w.text)}</small>
+      ${updateProgress(w)}
+      ${w.action ? `<div class="update-actions">${updateAction(w.action)}</div>` : ""}
+    </div>
+    ${w.closable === false ? "" : `<button class="update-close" data-update="hide" aria-label="ซ่อน" title="ซ่อน">${icon("x")}</button>`}`);
+  if (!fresh) return;
+  el.className = `update-card ${view.tone || ""}`;
+  el.hidden = false;
+  document.body.style.setProperty("--update-card-h", `${el.offsetHeight}px`);
+  if (MOTION && appear) G.fromTo(el, { y: 24, opacity: 0 }, { y: 0, opacity: 1, duration: 0.4, ease: "back.out(1.6)", clearProps: "transform,opacity" });
+  clearTimeout(updatedTimer);
+  if (view.key === "updated") updatedTimer = setTimeout(() => { updatedNoticeDone = true; renderUpdateCard(); }, 20000);
+}
+
+function renderUpdatePanel() {
+  const host = $("#update-status");
+  if (!host) return;
+  let view;
+  if (!desktop) {
+    view = { key: "browser", pill: ["", "อัปเดตตอนเปิด"], title: `ใช้ Sub360 ${statusCache?.version?.label || ""}`, text: "เปิดด้วย เริ่มโปรแกรม.bat จะดึงเวอร์ชันล่าสุดให้ทุกครั้ง — ผลการอัปเดตแสดงในหน้าต่างสีดำตอนเปิดโปรแกรม" };
+  } else if (!update) {
+    return;
+  } else if (!update.enabled) {
+    view = { key: "disabled", pill: ["", "ปิดอยู่"], title: `ใช้ Sub360 v${update.current}`, text: "อัปเดตอัตโนมัติทำงานเฉพาะแอปที่ติดตั้งจาก Sub360-Setup.exe" };
+  } else {
+    view = updateView(update);
+  }
+  paintUpdate(host, view, (w) => `
+    <div class="update-row">
+      <span class="pill ${w.pill[0]}">${esc(w.pill[1])}</span>
+      <div class="update-body">
+        <b class="update-title">${esc(w.title)}</b>
+        <small class="update-text">${esc(w.text)}</small>
+        ${w.detail ? `<small class="update-detail">${esc(w.detail)}</small>` : ""}
+      </div>
+      ${updateAction(w.action)}
+    </div>
+    ${updateProgress(w)}
+    ${update?.justUpdated ? `<p class="faint">เพิ่งอัปเดตเป็น v${esc(update.current)}${update.justUpdated.from ? ` จาก v${esc(update.justUpdated.from)}` : ""} ตอนเปิดโปรแกรมครั้งนี้</p>` : ""}`);
+}
+
+function onUpdateState(next) {
+  const prev = update;
+  update = next;
+  // ผลของการกดตรวจเองที่ไม่มีการ์ดขึ้น — บอกด้วย toast ให้รู้ว่ากดแล้วได้ผล
+  if (next.manual && prev?.state !== next.state) {
+    if (next.state === "not-available") toast(`Sub360 v${next.current} เป็นเวอร์ชันล่าสุดแล้ว`);
+    if (next.state === "error" && !next.version) toast("ตรวจหาอัปเดตไม่สำเร็จ — ตรวจการเชื่อมต่ออินเทอร์เน็ตแล้วลองใหม่");
+  }
+  renderUpdateCard();
+  renderUpdatePanel();
+}
+
+document.addEventListener("click", async (e) => {
+  const button = e.target.closest("[data-update]");
+  if (!button || !desktop) return;
+  const action = button.dataset.update;
+  if (action === "hide") {
+    const key = $("#update-card").dataset.key;
+    if (key === "updated") updatedNoticeDone = true;
+    else updateHidden = key;
+    renderUpdateCard();
+  } else if (action === "check") {
+    updateHidden = ""; // กดตรวจเอง = อยากเห็นผล การ์ดที่เคยซ่อนไว้ขึ้นได้อีก
+    const state = await desktop.checkForUpdates();
+    if (state) onUpdateState(state);
+  } else if (action === "install") {
+    button.disabled = true;
+    // แอปถามยืนยันก่อนถ้ามีงานถอดเสียง/เรนเดอร์ค้างอยู่ — ยกเลิกแล้วให้กดใหม่ได้
+    if (!(await desktop.installUpdate())) button.disabled = false;
+  }
+});
+
 /* ---------- เริ่ม ---------- */
 hydrateIcons();
 window.addEventListener("hashchange", route);
 refreshStatus();
 setInterval(refreshSidebar, 5000);
+if (desktop) {
+  desktop.onUpdate(onUpdateState);
+  desktop.updateState().then(onUpdateState).catch(() => {});
+}
 route();
