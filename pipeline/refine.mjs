@@ -9,6 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ffmpeg } from "./lib.mjs";
+import { pickAudioStream } from "./render.mjs";
 import { geminiJson } from "./gemini.mjs";
 
 const WINDOW_MS = 240_000;
@@ -61,6 +62,7 @@ export async function refineSegments(segments, { videoFile, language = "th", glo
   const windows = planWindows(segments);
   const out = segments.map((s) => ({ ...s }));
   const stats = { windows: windows.length, changed: 0, dropped: 0, rejected: 0 };
+  const audio = await pickAudioStream(videoFile, { signal });
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "sub360-refine-"));
   try {
     for (const [wi, win] of windows.entries()) {
@@ -70,6 +72,7 @@ export async function refineSegments(segments, { videoFile, language = "th", glo
         "-ss", (win.startMs / 1000).toFixed(3),
         "-t", ((win.endMs - win.startMs + 400) / 1000).toFixed(3),
         "-i", videoFile,
+        ...(audio == null ? [] : ["-map", `0:${audio}`]),
         "-vn", "-ac", "1", "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "48k",
         "-y", clip,
       ], { signal, timeoutMs: 5 * 60_000 });
