@@ -10,7 +10,7 @@ import path from "node:path";
 import { compileAss, compileSrt } from "./ass.mjs";
 import { AlphaOverlayError, renderOverlay } from "./hyperframes.mjs";
 import { ffmpeg } from "./lib.mjs";
-import { burnOntoSource, probe } from "./render.mjs";
+import { burnOntoSource, pickAudioStream, probe } from "./render.mjs";
 import { FONTS_DIR, loadStyle, prepareStyle } from "./styles.mjs";
 import { buildTimeline, compileText, compileVtt, finalizeTimeline, rewordChunk } from "./timeline.mjs";
 import { extractAudio, transcribe } from "./transcribe.mjs";
@@ -93,6 +93,7 @@ export async function renderSubtitles({
   input = path.resolve(input);
   fs.mkdirSync(workDir, { recursive: true });
   meta = meta || await probe(input, { signal });
+  const audioStream = await pickAudioStream(input, { signal });
   const { width, height } = meta;
   const { style } = prepareStyle(loadStyle(styleSlug), { width, height, colorSet, anchor, fontScale });
   const tl = finalizeTimeline(displayChunks(timeline.chunks, display), { durationMs: meta.durationMs, holdMs: 0, minChunkMs: 200 });
@@ -129,7 +130,7 @@ export async function renderSubtitles({
   if (style.lane === "hyperframes") {
     try {
       if (meta.durationMs > PIECE_THRESHOLD_MS) {
-        await renderPremiumInPieces({ input, workDir, tl, style, meta, signal, onProgress });
+        await renderPremiumInPieces({ input, workDir, tl, style, meta, audioStream, signal, onProgress });
       } else {
         await onProgress("overlay", 8, "เรนเดอร์ซับพรีเมียม (HyperFrames)");
         const overlay = await renderOverlay(tl, style, workDir, {
@@ -137,7 +138,7 @@ export async function renderSubtitles({
         }, (message) => onProgress("overlay", 45, message));
         await onProgress("burn", 50, "ประกอบซับลงวิดีโอ");
         await burnOntoSource(input, workDir, "final.mp4", {
-          overlay, fontsDir: FONTS_DIR, signal, durationMs: meta.durationMs,
+          overlay, fontsDir: FONTS_DIR, signal, durationMs: meta.durationMs, audioStream,
           onProgress: (ratio) => { onProgress("burn", Math.round(50 + ratio * 48), "ประกอบซับลงวิดีโอ"); },
         });
         fs.rmSync(overlay, { force: true });
@@ -158,6 +159,7 @@ export async function renderSubtitles({
     fontsDir: FONTS_DIR,
     signal,
     durationMs: meta.durationMs,
+    audioStream,
     onProgress: (ratio) => { onProgress("burn", Math.round(10 + ratio * 88), "ประกอบซับลงวิดีโอ"); },
   });
   return done();
@@ -212,7 +214,7 @@ export function sliceTimeline(chunks, a, b) {
  * ภาพทุกช่วงถูกบังคับเฟรมเรตคงที่และจำนวนเฟรมตายตัว ต่อกันแล้วยาวเท่าต้นฉบับเป๊ะ
  * เสียงไม่ถูกตัด — ดึงจากต้นฉบับทั้งเส้นตอนประกอบรอบสุดท้าย จึงไม่มีรอยสะดุดของเสียงที่รอยต่อ
  */
-async function renderPremiumInPieces({ input, workDir, tl, style, meta, signal, onProgress }) {
+async function renderPremiumInPieces({ input, workDir, tl, style, meta, audioStream, signal, onProgress }) {
   const fps = Math.round(meta.fps) || 30;
   const pieces = planPieces(tl.chunks, meta.durationMs, fps);
   const dir = path.join(workDir, "pieces");
@@ -260,7 +262,7 @@ async function renderPremiumInPieces({ input, workDir, tl, style, meta, signal, 
     await ffmpeg([
       "-f", "concat", "-safe", "0", "-i", "list.txt",
       "-i", path.resolve(input),
-      "-map", "0:v", "-map", "1:a?",
+      "-map", "0:v", ...(audioStream == null ? [] : ["-map", `1:${audioStream}`]),
       "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
       "-t", (meta.durationMs / 1000).toFixed(3),
       "-movflags", "+faststart",

@@ -9,6 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ffmpeg, run, throwIfAborted } from "./lib.mjs";
+import { pickAudioStream } from "./render.mjs";
 
 const defaultThreads = () => Math.max(1, Math.min(16, os.cpus()?.length || 4));
 const isAsciiPath = (value) => /^[ -~]*$/.test(String(value ?? ""));
@@ -32,8 +33,12 @@ export function whisperReady(environment = process.env) {
 
 /** แยกเสียงเป็น WAV 16 kHz mono ซึ่งเป็นรูปแบบที่ whisper ต้องการ */
 export async function extractAudio(videoFile, wavFile, opts = {}) {
+  // ระบุเส้นเสียงเอง — ไฟล์ iPhone มีเส้น Spatial Audio ที่ถอดไม่ได้ ถ้าปล่อยให้ ffmpeg เลือกอาจหยิบผิดเส้น
+  const audio = await pickAudioStream(videoFile, { signal: opts.signal });
+  if (audio == null) throw new Error("ไม่พบเสียงที่ถอดได้ในวิดีโอนี้ (ไม่มีเสียง หรือเป็นเสียงแบบที่ FFmpeg เปิดไม่ได้)");
   await ffmpeg([
     "-i", videoFile,
+    "-map", `0:${audio}`,
     "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
     "-y", wavFile,
   ], opts);
