@@ -530,6 +530,8 @@ const statusPill = (p) => {
   return `<span class="pill ${s.pill}">${s.cls === "done" ? icon("check") : s.cls === "running" ? '<span class="spinner" style="width:10px;height:10px"></span>' : ""}${s.text}</span>`;
 };
 const thumbVideo = (p) => (p.meta ? `<img src="/api/projects/${p.id}/poster" alt="" loading="lazy" onerror="this.remove()" />` : "");
+// วิดีโอ HDR (iPhone) มีสำเนา SDR ให้เล่นในแอป — สีตรงกับไฟล์ที่เรนเดอร์ ไม่ซีด/จ้าแบบเล่นไฟล์ HDR ตรง ๆ
+const sourceUrl = (p) => `/api/projects/${p.id}/source${p.sdrPreview ? "?sdr=1" : ""}`;
 
 async function refreshSidebar() {
   try {
@@ -621,7 +623,7 @@ async function pageHome() {
   const [{ projects }, status] = await Promise.all([api("/projects"), statusCache ? Promise.resolve(statusCache) : refreshStatus()]);
   const latest = projects.find((p) => p.status === "rendered") || projects.find((p) => p.meta);
   const phoneMedia = latest
-    ? `<video muted autoplay loop playsinline preload="metadata" src="/api/projects/${latest.id}/${latest.status === "rendered" ? "file/mp4" : "source"}"></video>`
+    ? `<video muted autoplay loop playsinline preload="metadata" src="${latest.status === "rendered" ? `/api/projects/${latest.id}/file/mp4` : sourceUrl(latest)}"></video>`
     : `<div class="phone-fill"></div>`;
   const showFakeCaption = !latest || latest.status !== "rendered";
   const running = projects.find(JOB_ACTIVE);
@@ -1249,7 +1251,7 @@ async function pageProject(id) {
     </aside>`;
   const mountPlayer = (host, opts = {}) => {
     player = createPlayer($("#player", host), {
-      src: `/api/projects/${id}/source`,
+      src: sourceUrl(project),
       meta: project.meta,
       getChunks: shown,
       getStyle: () => project.preparedStyle,
