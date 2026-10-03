@@ -13,8 +13,8 @@ import { fileURLToPath } from "node:url";
 import { ffmpeg, loadEnv } from "../pipeline/lib.mjs";
 import {
   CAPTION_COLOR_SETS, TRANSLATE_LANGS, finalizeTimeline, geminiKeys, geminiModel, geminiReady, listStyles,
-  loadStyle, parseSubtitles, prepareStyle, probe, refineSegments, renderSubtitles, rewordChunk,
-  timelineForVideo, transcribeVideo, translateChunks, whisperReady,
+  loadStyle, makeSdrPreview, parseSubtitles, prepareStyle, probe, refineSegments, renderSubtitles, rewordChunk,
+  sdrFilter, timelineForVideo, transcribeVideo, translateChunks, whisperReady,
 } from "../pipeline/index.mjs";
 import { createStore } from "./store.mjs";
 import {
@@ -99,6 +99,28 @@ async function pump() {
 
 function sourcePath(p) {
   return path.join(store.projectDir(p.id), p.source.file);
+}
+
+/* ---------- สำเนา SDR ของวิดีโอ HDR สำหรับตัวเล่นในแอป ---------- */
+// วิดีโอ HDR (iPhone) เล่นในแอปแล้วสีเพี้ยน — ทำสำเนา SDR ด้วยสูตรเดียวกับตอนเรนเดอร์ไว้ให้ตัวเล่นในแอป
+// ทำเบื้องหลังครั้งเดียวต่อโปรเจกต์ ระหว่างนั้นตัวเล่นใช้ต้นฉบับไปก่อน (ไฟล์ SDR ไม่ต้องทำอะไร)
+// ไม่จดสถานะลงไฟล์โปรเจกต์ — งานถอดเสียง/เรนเดอร์เขียนไฟล์โปรเจกต์อยู่พร้อมกัน ดูจากว่ามีไฟล์แล้วหรือยังพอ
+const previewFile = (id) => path.join(store.projectDir(id), "preview.mp4");
+const hasSdrPreview = (id) => fs.existsSync(previewFile(id));
+const previewChecked = new Set();
+
+function startSdrPreview(id) {
+  if (previewChecked.has(id) || hasSdrPreview(id)) return;
+  previewChecked.add(id);
+  makeSdrPreview(sourcePath(store.read(id)), previewFile(id))
+    .then((made) => {
+      // ภาพย่อที่ทำจากต้นฉบับ HDR ก็สีเพี้ยนเหมือนกัน — ลบทิ้งให้ทำใหม่แบบแปลงสีแล้ว
+      if (made) fs.rmSync(path.join(store.projectDir(id), "poster.jpg"), { force: true });
+    })
+    .catch((error) => {
+      previewChecked.delete(id);
+      console.error(`[preview] ${id}:`, error?.message);
+    });
 }
 
 const buildFor = (p, segments, meta = p.meta) => withIds(timelineForVideo(segments, meta, {
@@ -273,6 +295,7 @@ function geminiStatus() {
 /** โปรเจกต์ + สไตล์ที่สเกลตามวิดีโอแล้ว หน้าเว็บใช้วาดตัวอย่างซับให้ตรงกับที่จะเรนเดอร์ */
 function view(project) {
   const { segments, whisperSegments, ...rest } = project;
+  rest.sdrPreview = hasSdrPreview(project.id);
   rest.canRefine = Boolean(whisperSegments?.length || (segments?.length && !project.imported));
   if (!project.meta) return rest;
   const s = project.settings;
@@ -407,7 +430,9 @@ async function handleApi(req, res, url) {
   }
   if (parts[1] !== "projects") throw httpError(404, "ไม่พบ API");
 
-  if (parts.length === 2 && method === "GET") return sendJson(res, 200, { projects: store.list() });
+  if (parts.length === 2 && method === "GET") {
+    return sendJson(res, 200, { projects: store.list().map((p) => ({ ...p, sdrPreview: hasSdrPreview(p.id) })) });
+  }
 
   // อัปโหลด: ส่งไฟล์ดิบใน body ชื่อไฟล์อยู่ใน header — ไม่ต้อง parse multipart และสตรีมลงดิสก์ได้ทันที
   if (parts.length === 2 && method === "POST") {
@@ -444,6 +469,7 @@ async function handleApi(req, res, url) {
     }
     store.write({ ...store.read(project.id), meta, status: "uploaded" });
     if (!skipTranscribe) enqueue(project.id, "transcribe");
+    startSdrPreview(project.id);
     return sendJson(res, 201, { project: view(store.read(project.id)) });
   }
 
@@ -555,14 +581,18 @@ async function handleApi(req, res, url) {
       if (!project.meta) throw httpError(404, "ยังไม่มีภาพตัวอย่าง");
       const first = project.timeline?.chunks?.[0];
       const atSec = first ? (first.startMs + 400) / 1000 : Math.min(3, project.meta.durationMs / 2000);
+      const toSdr = await sdrFilter(sourcePath(project));
       await ffmpeg([
         "-ss", Math.min(atSec, project.meta.durationMs / 1000 - 0.1).toFixed(2), "-i", sourcePath(project),
-        "-frames:v", "1", "-vf", "scale=540:-2", "-q:v", "4", "-y", file,
+        "-frames:v", "1", "-vf", `${toSdr ? `${toSdr},` : ""}scale=540:-2`, "-q:v", "4", "-y", file,
       ], { timeoutMs: 30_000 });
     }
     return sendFile(req, res, file, { cache: "max-age=3600" });
   }
   if (action === "source" && ["GET", "HEAD"].includes(method)) {
+    // ?sdr=1 = ตัวเล่นในแอป ขอสำเนา SDR ถ้ามี — URL ต่างจากต้นฉบับ เบราว์เซอร์จึงไม่เอาสองไฟล์มาปนกันกลางการเล่น
+    if (url.searchParams.has("sdr") && hasSdrPreview(id)) return sendFile(req, res, previewFile(id));
+    startSdrPreview(id); // โปรเจกต์ที่อัปโหลดก่อนมีระบบนี้ — เปิดดูครั้งแรกแล้วค่อยทำ
     return sendFile(req, res, sourcePath(project));
   }
   if (action === "file" && ["GET", "HEAD"].includes(method)) {
