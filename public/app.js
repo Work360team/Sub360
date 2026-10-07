@@ -195,7 +195,6 @@ function lineCss(style, scale, fontPx) {
   const css = [`font-size:${fontPx}px`];
   if (p.pill) css.push(`background:${p.pill.color};padding:${(p.pill.padV ?? 18) * scale}px ${(p.pill.padH ?? 34) * scale}px;border-radius:${Math.min(999, (p.pill.radius ?? 999) * scale)}px`);
   if (p.box) css.push(`background:${hexAlpha(p.box.color, p.box.alpha ?? 64)};padding:${(p.outline?.width ?? 8) * scale * 0.6}px ${(p.outline?.width ?? 8) * scale}px`);
-  if (style.lane === "hyperframes") css.push("flex-wrap:nowrap");
   return css.join(";");
 }
 
