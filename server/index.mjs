@@ -14,7 +14,7 @@ import { ffmpeg, loadEnv } from "../pipeline/lib.mjs";
 import {
   CAPTION_COLOR_SETS, TRANSLATE_LANGS, finalizeTimeline, geminiKeys, geminiModel, geminiReady, listStyles,
   loadStyle, makeSdrPreview, parseSubtitles, prepareStyle, probe, refineSegments, renderSubtitles, rewordChunk,
-  sdrFilter, timelineForVideo, transcribeVideo, translateChunks, whisperReady,
+  hdrInfo, TO_SDR, timelineForVideo, transcribeVideo, translateChunks, whisperReady,
 } from "../pipeline/index.mjs";
 import { createStore } from "./store.mjs";
 import {
@@ -102,20 +102,26 @@ function sourcePath(p) {
 }
 
 /* ---------- สำเนา SDR ของวิดีโอ HDR สำหรับตัวเล่นในแอป ---------- */
-// วิดีโอ HDR (iPhone) เล่นในแอปแล้วสีเพี้ยน — ทำสำเนา SDR ด้วยสูตรเดียวกับตอนเรนเดอร์ไว้ให้ตัวเล่นในแอป
+// วิดีโอ HDR (iPhone) เล่นในแอปแล้วสีเพี้ยน — ทำสำเนา SDR (ขาวอ้างอิง HDR = ขาว SDR) ไว้ให้ตัวเล่นในแอป
+// ไฟล์ที่เรนเดอร์ไม่ได้ใช้สำเนานี้ — เรนเดอร์จากต้นฉบับและคงเป็น HDR เหมือนต้นฉบับ
 // ทำเบื้องหลังครั้งเดียวต่อโปรเจกต์ ระหว่างนั้นตัวเล่นใช้ต้นฉบับไปก่อน (ไฟล์ SDR ไม่ต้องทำอะไร)
 // ไม่จดสถานะลงไฟล์โปรเจกต์ — งานถอดเสียง/เรนเดอร์เขียนไฟล์โปรเจกต์อยู่พร้อมกัน ดูจากว่ามีไฟล์แล้วหรือยังพอ
-const previewFile = (id) => path.join(store.projectDir(id), "preview.mp4");
+// เลขท้ายชื่อไฟล์ = รุ่นของสูตรแปลงสี เปลี่ยนสูตรเมื่อไรให้ขยับเลข สำเนา/ภาพย่อรุ่นเก่าจะถูกทิ้งแล้วทำใหม่
+// (รุ่นแรกใน v0.4.5 ภาพสว่างเกินจริงราว 2 เท่า — ไฟล์ preview.mp4 / poster.jpg เดิมจึงใช้ต่อไม่ได้)
+const previewFile = (id) => path.join(store.projectDir(id), "preview-2.mp4");
+const posterFile = (id) => path.join(store.projectDir(id), "poster-2.jpg");
+const STALE_PREVIEWS = ["preview.mp4", "poster.jpg"];
 const hasSdrPreview = (id) => fs.existsSync(previewFile(id));
 const previewChecked = new Set();
 
 function startSdrPreview(id) {
   if (previewChecked.has(id) || hasSdrPreview(id)) return;
   previewChecked.add(id);
+  for (const name of STALE_PREVIEWS) fs.rmSync(path.join(store.projectDir(id), name), { force: true });
   makeSdrPreview(sourcePath(store.read(id)), previewFile(id))
     .then((made) => {
       // ภาพย่อที่ทำจากต้นฉบับ HDR ก็สีเพี้ยนเหมือนกัน — ลบทิ้งให้ทำใหม่แบบแปลงสีแล้ว
-      if (made) fs.rmSync(path.join(store.projectDir(id), "poster.jpg"), { force: true });
+      if (made) fs.rmSync(posterFile(id), { force: true });
     })
     .catch((error) => {
       previewChecked.delete(id);
@@ -576,12 +582,12 @@ async function handleApi(req, res, url) {
   if (action === "poster" && ["GET", "HEAD"].includes(method)) {
     // ภาพนิ่งจากคลิปจริง ใช้เป็นพื้นหลังตัวอย่างสไตล์และภาพย่อ — เบากว่าให้หน้าเว็บโหลด <video> ทีละสิบกว่าตัว
     // เลือกเฟรมตอนท่อนแรกกำลังพูด (มักเห็นคนหรือสินค้าชัดกว่าเฟรมแรกที่มักดำหรือเบลอ)
-    const file = path.join(store.projectDir(id), "poster.jpg");
+    const file = posterFile(id);
     if (!fs.existsSync(file)) {
       if (!project.meta) throw httpError(404, "ยังไม่มีภาพตัวอย่าง");
       const first = project.timeline?.chunks?.[0];
       const atSec = first ? (first.startMs + 400) / 1000 : Math.min(3, project.meta.durationMs / 2000);
-      const toSdr = await sdrFilter(sourcePath(project));
+      const toSdr = (await hdrInfo(sourcePath(project))) ? TO_SDR : null;
       await ffmpeg([
         "-ss", Math.min(atSec, project.meta.durationMs / 1000 - 0.1).toFixed(2), "-i", sourcePath(project),
         "-frames:v", "1", "-vf", `${toSdr ? `${toSdr},` : ""}scale=540:-2`, "-q:v", "4", "-y", file,

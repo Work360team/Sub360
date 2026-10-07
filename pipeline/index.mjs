@@ -10,12 +10,12 @@ import path from "node:path";
 import { compileAss, compileSrt } from "./ass.mjs";
 import { AlphaOverlayError, renderOverlay } from "./hyperframes.mjs";
 import { ffmpeg } from "./lib.mjs";
-import { burnOntoSource, pickAudioStream, probe, SDR_TAGS, sdrFilter } from "./render.mjs";
+import { burnOntoSource, hdrInfo, hdrTags, pickAudioStream, probe, subtitlesToHdr } from "./render.mjs";
 import { FONTS_DIR, loadStyle, prepareStyle } from "./styles.mjs";
 import { buildTimeline, compileText, compileVtt, finalizeTimeline, rewordChunk } from "./timeline.mjs";
 import { extractAudio, transcribe } from "./transcribe.mjs";
 
-export { makeSdrPreview, probe, sdrFilter, TO_SDR } from "./render.mjs";
+export { hdrInfo, makeSdrPreview, probe, TO_SDR } from "./render.mjs";
 export { listStyles, loadStyle, prepareStyle, CAPTION_COLOR_SETS } from "./styles.mjs";
 export { buildTimeline, finalizeTimeline, rewordChunk, compileVtt, compileText } from "./timeline.mjs";
 export { whisperReady, parseWhisperJson } from "./transcribe.mjs";
@@ -94,7 +94,7 @@ export async function renderSubtitles({
   fs.mkdirSync(workDir, { recursive: true });
   meta = meta || await probe(input, { signal });
   const audioStream = await pickAudioStream(input, { signal });
-  const toSdr = await sdrFilter(input, { signal });
+  const hdr = await hdrInfo(input, { signal });
   const { width, height } = meta;
   const { style } = prepareStyle(loadStyle(styleSlug), { width, height, colorSet, anchor, fontScale });
   const tl = finalizeTimeline(displayChunks(timeline.chunks, display), { durationMs: meta.durationMs, holdMs: 0, minChunkMs: 200 });
@@ -131,7 +131,7 @@ export async function renderSubtitles({
   if (style.lane === "hyperframes") {
     try {
       if (meta.durationMs > PIECE_THRESHOLD_MS) {
-        await renderPremiumInPieces({ input, workDir, tl, style, meta, audioStream, toSdr, signal, onProgress });
+        await renderPremiumInPieces({ input, workDir, tl, style, meta, audioStream, hdr, signal, onProgress });
       } else {
         await onProgress("overlay", 8, "เรนเดอร์ซับพรีเมียม (HyperFrames)");
         const overlay = await renderOverlay(tl, style, workDir, {
@@ -139,7 +139,7 @@ export async function renderSubtitles({
         }, (message) => onProgress("overlay", 45, message));
         await onProgress("burn", 50, "ประกอบซับลงวิดีโอ");
         await burnOntoSource(input, workDir, "final.mp4", {
-          overlay, fontsDir: FONTS_DIR, signal, durationMs: meta.durationMs, audioStream, toSdr,
+          overlay, fontsDir: FONTS_DIR, signal, meta, audioStream, hdr,
           onProgress: (ratio) => { onProgress("burn", Math.round(50 + ratio * 48), "ประกอบซับลงวิดีโอ"); },
         });
         fs.rmSync(overlay, { force: true });
@@ -159,9 +159,9 @@ export async function renderSubtitles({
   await burnOntoSource(input, workDir, "final.mp4", {
     fontsDir: FONTS_DIR,
     signal,
-    durationMs: meta.durationMs,
+    meta,
     audioStream,
-    toSdr,
+    hdr,
     onProgress: (ratio) => { onProgress("burn", Math.round(10 + ratio * 88), "ประกอบซับลงวิดีโอ"); },
   });
   return done();
@@ -216,7 +216,7 @@ export function sliceTimeline(chunks, a, b) {
  * ภาพทุกช่วงถูกบังคับเฟรมเรตคงที่และจำนวนเฟรมตายตัว ต่อกันแล้วยาวเท่าต้นฉบับเป๊ะ
  * เสียงไม่ถูกตัด — ดึงจากต้นฉบับทั้งเส้นตอนประกอบรอบสุดท้าย จึงไม่มีรอยสะดุดของเสียงที่รอยต่อ
  */
-async function renderPremiumInPieces({ input, workDir, tl, style, meta, audioStream, toSdr, signal, onProgress }) {
+async function renderPremiumInPieces({ input, workDir, tl, style, meta, audioStream, hdr, signal, onProgress }) {
   const fps = Math.round(meta.fps) || 30;
   const pieces = planPieces(tl.chunks, meta.durationMs, fps);
   const dir = path.join(workDir, "pieces");
@@ -243,14 +243,15 @@ async function renderPremiumInPieces({ input, workDir, tl, style, meta, audioStr
       const out = path.join(dir, `piece_${String(i).padStart(4, "0")}.mp4`);
       const args = ["-ss", (piece.startMs / 1000).toFixed(4), "-i", path.resolve(input)];
       if (overlay) args.push("-i", overlay);
-      const sdr = toSdr ? `${toSdr},` : "";
+      // คลิป HDR: ภาพเดิมไม่ถูกแตะ แปลงเฉพาะชั้นซับเข้าระบบสี HDR (ดู subtitlesToHdr ใน render.mjs)
+      const sub = hdr ? `[1:v]${subtitlesToHdr(hdr, "hyperframes")}[ov];[b][ov]` : "[b][1:v]";
       args.push(
         "-filter_complex", overlay
-          ? `[0:v]${sdr}fps=${fps},setpts=PTS-STARTPTS[b];[b][1:v]overlay=0:0:eof_action=pass:format=auto[v]`
-          : `[0:v]${sdr}fps=${fps},setpts=PTS-STARTPTS[v]`,
+          ? `[0:v]fps=${fps},setpts=PTS-STARTPTS[b];${sub}overlay=0:0:eof_action=pass:format=${hdr ? "yuv420p10" : "auto"}[v]`
+          : `[0:v]fps=${fps},setpts=PTS-STARTPTS[v]`,
         "-map", "[v]", "-an",
         "-frames:v", String(piece.frames),
-        "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", ...(toSdr ? SDR_TAGS : []), "-r", String(fps),
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p", ...(hdr ? hdrTags(hdr) : []), "-r", String(fps),
         "-y", out,
       );
       await ffmpeg(args, { signal, timeoutMs: 60 * 60_000 });
