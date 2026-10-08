@@ -244,7 +244,7 @@ async function renderPremiumInPieces({ input, workDir, tl, style, meta, audioStr
       const args = ["-ss", (piece.startMs / 1000).toFixed(4), "-i", path.resolve(input)];
       if (overlay) args.push("-i", overlay);
       // คลิป HDR: ภาพเดิมไม่ถูกแตะ แปลงเฉพาะชั้นซับเข้าระบบสี HDR (ดู subtitlesToHdr ใน render.mjs)
-      const sub = hdr ? `[1:v]${subtitlesToHdr(hdr, "hyperframes")}[ov];[b][ov]` : "[b][1:v]";
+      const sub = hdr ? `${subtitlesToHdr(hdr, "hyperframes", "1:v", "ov")};[b][ov]` : "[b][1:v]";
       args.push(
         "-filter_complex", overlay
           ? `[0:v]fps=${fps},setpts=PTS-STARTPTS[b];${sub}overlay=0:0:eof_action=pass:format=${hdr ? "yuv420p10" : "auto"}[v]`
