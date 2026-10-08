@@ -35,9 +35,14 @@ export async function probe(file, opts = {}) {
 //
 // ห้ามปรับแสงภาพต้นฉบับ (v0.4.5 แปลงทั้งภาพเป็น SDR แล้วภาพสว่าง/ซีดกว่าต้นฉบับ) จึงแปลง "เฉพาะชั้นซับ"
 // เข้าไปอยู่ในระบบสี HDR ของคลิปแทน แล้ววางทับภาพเดิมที่ไม่ถูกแตะ — ไฟล์ออกยังเป็น HDR เหมือนต้นฉบับ
-// สีขาวของซับ = ขาวอ้างอิงของ HDR 203 nits (ITU-R BT.2408) คือระดับเดียวกับกระดาษขาว/ข้อความในคลิป HDR
 export const HDR_TRANSFERS = new Set(["arib-std-b67", "smpte2084"]);
+// ขาวอ้างอิงของ HDR (ITU-R BT.2408) = ระดับกระดาษขาวในคลิป ใช้แปลงภาพลง SDR ให้ดูในแอป
 const REF_WHITE_NITS = 203;
+// ขาวของซับ = ยอดสว่างของ HLG (1000 nits, สัญญาณ 100%) ให้ซับสว่างเท่าส่วนที่สว่างที่สุดในคลิปเหมือนในแอป
+// v0.4.6–0.4.7 ใช้ 203 nits (สัญญาณ HLG 75%) — ตัวเล่นส่วนใหญ่ย่อ HDR ลงจอปกติโดยให้ยอด 1000 nits = ขาว
+// ซับขาวจึงออกมาเทา ~130/255 เขียว #3DF07B เป็นเขียวทึบ (ไฟล์จากทีมงาน v0.4.7 วัดได้ 56,104,64)
+// แบบนี้ตัวเล่นแบบนั้นได้สีตรงกับในแอป (คลาดเฉลี่ย ΔE≈1) ตัวเล่นที่เปิดค่าดิบได้ขาว 255 แทน 191
+const SUBTITLE_WHITE_NITS = 1000;
 
 /**
  * แปลง HDR → SDR สำหรับดูในแอปเท่านั้น (สำเนาตัวอย่าง + ภาพย่อ) ไม่ใช้กับไฟล์ที่เรนเดอร์
@@ -94,7 +99,7 @@ export function subtitlesToHdr(hdr, source, from, to) {
     ? ["yuva444p12le", "yuv444p12le", "170m"]
     : ["yuva444p", "yuv444p", "bt709"];
   const z = `zscale=min=${matrix}:rin=tv:tin=bt709:pin=bt709:t=${hdr.transfer}:p=${hdr.primaries}:m=${hdr.matrix}:r=tv`
-    + `:npl=${REF_WHITE_NITS}`;
+    + `:npl=${SUBTITLE_WHITE_NITS}`;
   return `[${from}]format=${alpha},split[${to}_c][${to}_a];[${to}_a]alphaextract[${to}_al];`
     + `[${to}_c]format=${color},${z},format=yuv420p10le[${to}_cc];`
     + `[${to}_cc][${to}_al]alphamerge,format=yuva420p10le[${to}]`;
