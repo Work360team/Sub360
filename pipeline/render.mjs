@@ -74,14 +74,30 @@ export async function hdrInfo(file, opts = {}) {
 }
 
 /**
- * filter แปลงชั้นซับ (SDR) เข้าระบบสี HDR ของคลิป — ผลเป็น yuva ไว้ overlay ทับภาพ HDR
- * source "rgb" = ชั้นที่ libass วาดเป็น RGBA · "hyperframes" = ProRes 4444 จาก HyperFrames
- * ซึ่งเข้ารหัสด้วย matrix BT.601 ช่วงสีแบบ tv (วัดแล้ว: ถอดแบบนี้ได้ #FFD400 ตรง ถอดแบบ BT.709 ได้ 255,204,0)
+ * ชั้นโปร่งใสให้ libass วาดซับลงไป ก่อนแปลงเป็น HDR — ต้องเป็น YUV ที่ระบุ BT.709 ช่วง tv ไว้ชัด ๆ
+ * (วาดลง RGBA แล้ว FFmpeg 8.x บีบสีเป็นช่วง 16–235: เหลือง 255,212,0 ออกมา 235,198,16 ส่วน 7.x ไม่บีบ
+ *  แบบนี้ได้ค่าเดียวกันทั้งสองรุ่น วัดแล้ว)
  */
-export function subtitlesToHdr(hdr, source = "rgb") {
-  const input = source === "hyperframes" ? "min=170m:rin=tv:" : "";
-  return `zscale=${input}tin=bt709:pin=bt709:t=${hdr.transfer}:p=${hdr.primaries}:m=${hdr.matrix}:r=tv`
-    + `:npl=${REF_WHITE_NITS},format=yuva420p10le`;
+export const LIBASS_LAYER = "format=yuva444p,setparams=colorspace=bt709:range=tv";
+
+/**
+ * filtergraph แปลงชั้นซับ (SDR) เข้าระบบสี HDR ของคลิป: [from] → [to] เป็น yuva ไว้ overlay ทับภาพ HDR
+ * source "libass" = ชั้น LIBASS_LAYER · "hyperframes" = ProRes 4444 จาก HyperFrames
+ * ซึ่งเข้ารหัสด้วย matrix BT.601 ช่วงสีแบบ tv (วัดแล้ว: ถอดแบบนี้ได้ #FFD400 ตรง ถอดแบบ BT.709 ได้ 255,204,0)
+ *
+ * แยก alpha ออกก่อนเข้า zscale แล้วค่อยรวมกลับ — zscale ของ FFmpeg 8.x แปลงภาพที่มี alpha ผิด
+ * ตัวหนังสือออกมาดำและเลื่อนตำแหน่ง (ทีมงานเจอจริงกับ gyan.dev 8.1) ส่วน 7.x ถูก
+ * ผ่าน alphaextract/alphamerge แล้วได้ผลตรงกันทั้งสองรุ่น
+ */
+export function subtitlesToHdr(hdr, source, from, to) {
+  const [alpha, color, matrix] = source === "hyperframes"
+    ? ["yuva444p12le", "yuv444p12le", "170m"]
+    : ["yuva444p", "yuv444p", "bt709"];
+  const z = `zscale=min=${matrix}:rin=tv:tin=bt709:pin=bt709:t=${hdr.transfer}:p=${hdr.primaries}:m=${hdr.matrix}:r=tv`
+    + `:npl=${REF_WHITE_NITS}`;
+  return `[${from}]format=${alpha},split[${to}_c][${to}_a];[${to}_a]alphaextract[${to}_al];`
+    + `[${to}_c]format=${color},${z},format=yuv420p10le[${to}_cc];`
+    + `[${to}_cc][${to}_al]alphamerge,format=yuva420p10le[${to}]`;
 }
 
 /** ป้ายระบบสีของไฟล์ออก ให้ตรงกับต้นฉบับ HDR */
@@ -161,7 +177,7 @@ export async function burnOntoSource(input, workDir, outFile, opts) {
     args.push("-i", path.resolve(overlay));
     // คลิป HDR: แปลงชั้นซับเข้าระบบสี HDR ก่อนวางทับ ภาพต้นฉบับไม่ถูกแตะ (ดู subtitlesToHdr)
     filter = hdr
-      ? `[1:v]${subtitlesToHdr(hdr, "hyperframes")}[ov];[0:v][ov]overlay=0:0:eof_action=pass:format=yuv420p10[v]`
+      ? `${subtitlesToHdr(hdr, "hyperframes", "1:v", "ov")};[0:v][ov]overlay=0:0:eof_action=pass:format=yuv420p10[v]`
       : "[0:v][1:v]overlay=0:0:eof_action=pass:format=auto[v]";
   } else {
     if (!fs.existsSync(fontsDir)) throw new Error(`ไม่พบโฟลเดอร์ฟอนต์: ${fontsDir}`);
@@ -171,8 +187,8 @@ export async function burnOntoSource(input, workDir, outFile, opts) {
       // libass วาดลงชั้นโปร่งใสขนาดเท่าภาพ (alpha=1) แล้วแปลงชั้นนั้นเป็น HDR ก่อนวางทับ
       const m = opts.meta || await probe(path.resolve(input), { signal });
       const fps = Math.round(m.fps) || 30;
-      filter = `color=c=black@0.0:s=${m.width}x${m.height}:r=${fps}:d=${(m.durationMs / 1000 + 1).toFixed(3)},format=rgba,`
-        + `${ass}:alpha=1,${subtitlesToHdr(hdr, "rgb")}[ov];[0:v][ov]overlay=0:0:eof_action=pass:format=yuv420p10[v]`;
+      filter = `color=c=black@0.0:s=${m.width}x${m.height}:r=${fps}:d=${(m.durationMs / 1000 + 1).toFixed(3)},${LIBASS_LAYER},`
+        + `${ass}:alpha=1[subs];${subtitlesToHdr(hdr, "libass", "subs", "ov")};[0:v][ov]overlay=0:0:eof_action=pass:format=yuv420p10[v]`;
     } else {
       filter = `[0:v]${ass}[v]`;
     }
