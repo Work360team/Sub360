@@ -4,11 +4,12 @@
 // misconfigured tunnel can never reach /api or the app pages. AI apps sign in with OAuth 2.1
 // (PKCE S256, dynamic client registration, rotating refresh tokens).
 //
-// The "login" is pairing started from the Sub360 window: the person presses "connect a new AI app",
-// Sub360 shows a one-time 6-digit code, and the person types it on the page the AI app opened.
-// Nothing is accepted while no pairing is open, so a stranger who knows the tunnel address cannot
-// queue a request and wait for someone to press Allow (the code travels from the window to the
-// person's own browser, never the other way round).
+// The "login" is pairing: when the AI app opens the consent page, the Sub360 window comes up with a
+// one-time 6-digit code (or the person presses "connect a new AI app"), and the person types it on
+// that page. The code travels from the window to the person's own browser, never the other way
+// round, so a stranger who knows the tunnel address and opens the consent page gets nowhere unless
+// someone reads the code out to them — there is no "Allow" button to trick anyone into pressing.
+// Ten wrong codes close the pairing and stop automatic pairing for ten minutes (no brute force).
 //
 // Lessons kept from the webapp-mcp-connector kit (proven with the three apps):
 //   - every /mcp method without a token answers 401 + resource_metadata (Gemini probes GET/HEAD)
@@ -16,7 +17,9 @@
 //   - state can be ~1,700 characters (Gemini) → accept up to 8,000
 //   - the consent page never answers a form POST with 302 (Chrome blocks it under CSP form-action):
 //     the page posts with fetch and navigates itself
-import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { readBody, sendJson, serveMcp } from "./http.mjs";
 
 const ACCESS_TTL_S = 3600;
@@ -24,6 +27,8 @@ const REFRESH_TTL_MS = 30 * 86_400_000;
 const CODE_TTL_MS = 5 * 60_000;
 const PAIRING_TTL_MS = 10 * 60_000;
 const PAIRING_MAX_FAILURES = 10;
+const AUTO_PAIRING_LOCK_MS = 10 * 60_000;
+const FILE_LINK_TTL_MS = 3 * 86_400_000;
 const ROTATE_GRACE_MS = 60_000;
 const REUSE_WATCH_MS = 86_400_000; // a rotated refresh token is kept a day to catch reuse
 const MAX_CLIENTS = 300;
@@ -94,14 +99,17 @@ async function readForm(req, limit = 64 * 1024) {
 const clientIp = (req) => String(req.headers["cf-connecting-ip"] || "local").slice(0, 64);
 
 /**
- * createGateway({ store, mcp, publicUrl, log })
- *   publicUrl()  "https://<tunnel host>" or null while the tunnel is not up
+ * createGateway({ store, mcp, publicUrl, onPairing, files, log })
+ *   publicUrl()       "https://<tunnel host>" or null while the tunnel is not up
+ *   onPairing(status) an AI app opened the consent page: show the code in the Sub360 window
+ *   files.resolve(projectId, kind) → { path, name } of a rendered output, or null
  */
-export function createGateway({ store, mcp, publicUrl, log = console.error }) {
+export function createGateway({ store, mcp, publicUrl, onPairing = () => {}, files = null, log = console.error }) {
   const codes = new Map(); // sha256(code) → authorization code record
   const registrations = new Map(); // ip → { since, count }
-  let pairing = null; // { code, expiresAt, failures }
+  let pairing = null; // { code, expiresAt, failures, auto, requesters: [{ clientName, redirectHost, at }] }
   let lastConnected = null; // { clientName, at } — the window shows "connected" after pairing
+  let autoLockedUntil = 0; // after too many wrong codes, consent visits stop opening pairings for a while
 
   const base = () => publicUrl();
   const resourceUrl = () => `${base()}/mcp`;
@@ -115,21 +123,51 @@ export function createGateway({ store, mcp, publicUrl, log = console.error }) {
     if (pairing && pairing.expiresAt < now) pairing = null;
   }
 
-  /* ---------- pairing (started by the person in the Sub360 window) ---------- */
+  /* ---------- pairing ---------- */
 
+  const newPairing = (auto) => ({
+    code: String(randomInt(0, 1_000_000)).padStart(6, "0"),
+    expiresAt: Date.now() + PAIRING_TTL_MS,
+    failures: 0,
+    auto,
+    requesters: [],
+  });
+
+  /** The person pressed "connect a new AI app" in the window (also lifts the automatic-pairing lock). */
   function startPairing() {
-    pairing = { code: String(randomInt(0, 1_000_000)).padStart(6, "0"), expiresAt: Date.now() + PAIRING_TTL_MS, failures: 0 };
+    pairing = newPairing(false);
     lastConnected = null;
+    autoLockedUntil = 0;
     return pairingStatus();
   }
+
+  /**
+   * An AI app opened the consent page: open a pairing (or reuse the open one) and note who asked,
+   * so the window can show the code with the app's name. → true when the window should come up.
+   */
+  function pairingForRequest(r) {
+    sweep();
+    if (!pairing) {
+      if (Date.now() < autoLockedUntil) return false;
+      pairing = newPairing(true);
+      lastConnected = null;
+    }
+    const seen = pairing.requesters.find((x) => x.clientName === r.clientName && x.redirectHost === r.redirectHost);
+    if (seen) seen.at = Date.now();
+    else pairing.requesters = [...pairing.requesters, { clientName: r.clientName, redirectHost: r.redirectHost, at: Date.now() }].slice(-5);
+    return true;
+  }
+
   function cancelPairing() {
     pairing = null;
   }
+
   function pairingStatus() {
     sweep();
     return {
-      open: pairing ? { code: pairing.code, expiresAt: pairing.expiresAt } : null,
+      open: pairing ? { code: pairing.code, expiresAt: pairing.expiresAt, auto: pairing.auto, requesters: pairing.requesters } : null,
       lastConnected,
+      autoLockedUntil: autoLockedUntil > Date.now() ? autoLockedUntil : null,
     };
   }
 
@@ -234,6 +272,8 @@ export function createGateway({ store, mcp, publicUrl, log = console.error }) {
       res.writeHead(302, { location: checked.redirect, "cache-control": "no-store" });
       return res.end();
     }
+    // Bring the Sub360 window up with the code (the caller throttles how often the window pops up).
+    if (pairingForRequest(checked.ok)) onPairing(pairingStatus());
     const nonce = secret(12);
     res.writeHead(200, pageHeaders(nonce));
     return res.end(consentPage(checked.ok, nonce));
@@ -257,7 +297,8 @@ export function createGateway({ store, mcp, publicUrl, log = console.error }) {
       pairing.failures += 1;
       if (pairing.failures >= PAIRING_MAX_FAILURES) {
         pairing = null;
-        return sendJson(res, 403, { error: "รหัสผิดหลายครั้งเกินไป — กด \"เชื่อมแอป AI ใหม่\" ใน Sub360 อีกครั้งเพื่อรับรหัสใหม่" });
+        autoLockedUntil = Date.now() + AUTO_PAIRING_LOCK_MS;
+        return sendJson(res, 403, { error: "รหัสผิดหลายครั้งเกินไป — กด \"เชื่อมแอป AI ใหม่\" ในหน้าต่าง Sub360 เพื่อรับรหัสใหม่" });
       }
       return sendJson(res, 403, { error: `รหัสไม่ถูกต้อง — ดูรหัสในหน้าต่าง Sub360 อีกครั้ง (ลองได้อีก ${PAIRING_MAX_FAILURES - pairing.failures} ครั้ง)` });
     }
@@ -361,6 +402,59 @@ export function createGateway({ store, mcp, publicUrl, log = console.error }) {
     return { grant: { id: t.grantId, ...grant }, given: true };
   }
 
+  /* ---------- online links to rendered files ---------- */
+  // /files/<project>/<kind>?e=<expiry>&s=<HMAC> — anyone with the link can watch or download that one
+  // file until it expires (3 days), and only while Sub360 and the tunnel are running. The key lives in
+  // mcp-remote.json; changing it (store.resetLinkKey) kills every link at once.
+
+  const FILE_TYPES = {
+    ".mp4": "video/mp4", ".srt": "text/plain; charset=utf-8", ".ass": "text/plain; charset=utf-8",
+    ".vtt": "text/vtt; charset=utf-8", ".txt": "text/plain; charset=utf-8",
+  };
+  const signFile = (id, kind, exp) => createHmac("sha256", store.linkKey()).update(`${id}\n${kind}\n${exp}`).digest("base64url");
+
+  /** A link to a rendered file, or null while there is no public address. */
+  function fileLink(id, kind, ttlMs = FILE_LINK_TTL_MS) {
+    if (!base()) return null;
+    const exp = Math.floor((Date.now() + ttlMs) / 1000);
+    return `${base()}/files/${encodeURIComponent(id)}/${encodeURIComponent(kind)}?e=${exp}&s=${signFile(id, kind, exp)}`;
+  }
+
+  function serveFile(req, res, id, kind, url) {
+    const exp = Number(url.searchParams.get("e"));
+    const valid = /^[a-z0-9]{6,32}$/.test(id) && /^[A-Za-z0-9]{2,20}$/.test(kind) && Number.isInteger(exp)
+      && exp * 1000 > Date.now() && sameText(url.searchParams.get("s") || "", signFile(id, kind, exp));
+    if (!valid) return sendJson(res, 403, { error: "ลิงก์นี้หมดอายุหรือไม่ถูกต้อง — ขอลิงก์ใหม่จากแอป AI (get_project)" });
+    const file = files?.resolve(id, kind);
+    let stat = null;
+    try { stat = file && fs.statSync(file.path); } catch { /* gone */ }
+    if (!stat?.isFile()) return sendJson(res, 404, { error: "ไม่พบไฟล์นี้แล้ว — อาจถูกลบหรือเรนเดอร์ใหม่" });
+    const headers = {
+      "content-type": FILE_TYPES[path.extname(file.path).toLowerCase()] || "application/octet-stream",
+      "accept-ranges": "bytes",
+      "cache-control": "private, no-store",
+      "x-content-type-options": "nosniff",
+      "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`,
+    };
+    // Subtitle text came from the video's speech: never let a browser treat it as a page.
+    if (!headers["content-type"].startsWith("video/")) headers["content-security-policy"] = "default-src 'none'; sandbox";
+    const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ""));
+    if (range && (range[1] || range[2])) {
+      const start = range[1] ? Number(range[1]) : Math.max(0, stat.size - Number(range[2]));
+      const end = range[1] && range[2] ? Math.min(Number(range[2]), stat.size - 1) : stat.size - 1;
+      if (start >= stat.size || start > end) {
+        res.writeHead(416, { "content-range": `bytes */${stat.size}` });
+        return res.end();
+      }
+      res.writeHead(206, { ...headers, "content-range": `bytes ${start}-${end}/${stat.size}`, "content-length": end - start + 1 });
+      if (req.method === "HEAD") return res.end();
+      return fs.createReadStream(file.path, { start, end }).pipe(res);
+    }
+    res.writeHead(200, { ...headers, "content-length": stat.size });
+    if (req.method === "HEAD") return res.end();
+    return fs.createReadStream(file.path).pipe(res);
+  }
+
   /* ---------- routing ---------- */
 
   async function handle(req, res) {
@@ -387,6 +481,8 @@ export function createGateway({ store, mcp, publicUrl, log = console.error }) {
           return sendJson(res, 200, authServer(), CORS);
         }
         if (p === "/oauth/authorize") return authorize(res, url);
+        const fileRoute = /^\/files\/([^/]+)\/([^/]+)$/.exec(p);
+        if (fileRoute) return serveFile(req, res, decodeURIComponent(fileRoute[1]), decodeURIComponent(fileRoute[2]), url);
       }
       if (req.method === "POST" && p === "/oauth/authorize/pair") return await pair(req, res);
       if (req.method === "POST" && p === "/oauth/register") return await register(req, res);
@@ -417,7 +513,7 @@ export function createGateway({ store, mcp, publicUrl, log = console.error }) {
     }
   }
 
-  return { handle, startPairing, cancelPairing, pairingStatus };
+  return { handle, startPairing, cancelPairing, pairingStatus, fileLink };
 }
 
 /* ---------- pages ---------- */
@@ -456,7 +552,7 @@ function consentPage(r, nonce) {
   const app = knownApp(r.redirect_uri);
   const body = `<p><b>${esc(r.clientName)}</b> ขอเชื่อมต่อกับ Sub360 บนคอมพิวเตอร์ของคุณ<br>แล้วจะพากลับไปที่ <b>${esc(r.redirectHost)}</b></p>
 ${app ? "" : `<div class="warn">ปลายทางนี้ไม่ใช่แอป AI ที่ Sub360 รู้จัก — ทำต่อเฉพาะเมื่อคุณตั้งใจเชื่อมแอปนี้เอง</div>`}
-<p>เปิด Sub360 → <b>เชื่อมต่อ AI</b> → กด <b>เชื่อมแอป AI ใหม่</b> แล้วพิมพ์รหัส 6 หลักที่ขึ้นในหน้าต่าง Sub360</p>
+<p>หน้าต่าง Sub360 บนเครื่องของคุณจะขึ้นมาพร้อม<b>รหัส 6 หลัก</b> พิมพ์รหัสนั้นที่นี่<br><small>ถ้าไม่ขึ้น: เปิด Sub360 → เชื่อมต่อ AI → กด เชื่อมแอป AI ใหม่</small></p>
 <label for="code" class="sr">รหัสจาก Sub360</label>
 <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="000000" aria-describedby="state" autofocus>
 <button class="go" id="go">เชื่อมต่อ</button><button class="cancel" id="cancel">ยกเลิก</button>

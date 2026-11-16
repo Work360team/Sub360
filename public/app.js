@@ -2432,17 +2432,24 @@ async function pageConnect() {
   // การเชื่อมใหม่เริ่มที่นี่เสมอ: กดแล้วได้รหัสไปพิมพ์ในหน้าที่แอป AI เปิดขึ้นมา (คำขอที่คุณไม่ได้เริ่มจะไม่ผ่าน)
   function pairingHtml(p) {
     if (p.open) {
+      const asking = p.open.requesters || [];
+      const who = asking.length
+        ? `<div><b>${asking.map((x) => `${esc(x.clientName)} <small class="faint">(${esc(x.redirectHost)})</small>`).join(" · ")}</b> ขอเชื่อมต่อ</div>`
+        : `<div><b>พร้อมเชื่อมแอป AI ใหม่</b></div>`;
       return `<div class="pending-card" role="status">
-        <div><b>พร้อมเชื่อมแอป AI ใหม่</b> <small class="faint">· ใช้ได้ครั้งเดียว ถึง ${clockTime(p.open.expiresAt)} น.</small></div>
+        ${who}
         <div class="pair-code" aria-label="รหัสเชื่อมต่อ">${esc(p.open.code)}</div>
-        <p class="muted" style="margin:0;font-size:13px">ในแอป AI กดเพิ่มการเชื่อมต่อด้วยที่อยู่ข้างบน แล้วพิมพ์รหัสนี้ในหน้าที่เปิดขึ้นมา</p>
+        <p class="muted" style="margin:0;font-size:13px">${asking.length ? "พิมพ์รหัสนี้ในหน้าที่แอป AI เปิดขึ้นมาในเบราว์เซอร์" : "ในแอป AI กดเพิ่มการเชื่อมต่อด้วยที่อยู่ข้างบน แล้วพิมพ์รหัสนี้ในหน้าที่เปิดขึ้นมา"} · ใช้ได้ครั้งเดียว ถึง ${clockTime(p.open.expiresAt)} น.</p>
+        ${asking.length > 1 ? `<div class="form-alert error">${icon("alert")}<div>มีมากกว่าหนึ่งแอปขอเชื่อมต่อพร้อมกัน — ถ้ามีแอปที่คุณไม่ได้เพิ่งเชื่อมเอง ให้กดยกเลิก แล้วเริ่มใหม่จากแอปของคุณ</div></div>` : ""}
         <div class="form-alert">${icon("shield")}<div>อย่าบอกรหัสนี้กับใคร และอย่าพิมพ์ในเว็บที่คนอื่นส่งมาให้ — ใครได้รหัสไปจะสั่งงาน Sub360 บนเครื่องนี้ได้ (ยกเว้นลบโปรเจกต์)</div></div>
         <div class="row"><button class="button button-quiet button-sm" data-pair-cancel>ยกเลิก</button></div></div>`;
     }
     const done = p.lastConnected && Date.now() - p.lastConnected.at < 10 * 60_000
       ? `<div class="form-alert ok">${icon("check")}<div>เชื่อม <b>${esc(p.lastConnected.clientName)}</b> (${esc(p.lastConnected.redirectHost)}) แล้ว — ถ้าไม่ใช่แอปที่คุณเพิ่งเชื่อม ให้กดยกเลิกในรายการด้านล่าง</div></div>` : "";
-    return `${done}<div class="row" style="align-items:center;gap:12px"><button class="button button-primary" data-pair-start>${icon("plus")}เชื่อมแอป AI ใหม่</button>
-      <small class="faint" style="flex:1;min-width:200px">กดก่อนเพิ่มการเชื่อมต่อในแอป AI — จะได้รหัส 6 หลักไว้พิมพ์ในหน้าที่แอปเปิดขึ้นมา</small></div>`;
+    const locked = p.autoLockedUntil
+      ? `<div class="form-alert error">${icon("alert")}<div>มีการพิมพ์รหัสผิดหลายครั้ง — หยุดแสดงรหัสอัตโนมัติถึง ${clockTime(p.autoLockedUntil)} น. ถ้าคุณกำลังเชื่อมแอปเอง กดปุ่มด้านล่างเพื่อรับรหัสใหม่</div></div>` : "";
+    return `${done}${locked}<div class="row" style="align-items:center;gap:12px"><button class="button button-primary" data-pair-start>${icon("plus")}เชื่อมแอป AI ใหม่</button>
+      <small class="faint" style="flex:1;min-width:200px">เพิ่มการเชื่อมต่อในแอป AI ได้เลย รหัส 6 หลักจะขึ้นที่นี่เองเมื่อแอปเปิดหน้าขอเชื่อมต่อ (หรือกดปุ่มนี้เพื่อรับรหัสก่อน)</small></div>`;
   }
   let liveKey = "";
   function paintLive() {
@@ -2460,7 +2467,8 @@ async function pageConnect() {
       ${r.mcpUrl ? pairingHtml(r.pairing || {}) : ""}
       <div class="field"><span>แอปที่เชื่อมไว้</span>
         ${r.connections.length ? `<div class="setting-block">${r.connections.map((c) => `<div class="key-row">${icon("plug")}<div><b style="font-weight:500">${esc(c.clientName)}</b> <small class="faint">${esc(c.redirectHost)} · เชื่อมเมื่อ ${fmtDate(new Date(c.createdAt).toISOString())}${c.lastUsedAt ? ` · ใช้ล่าสุด ${fmtDate(new Date(c.lastUsedAt).toISOString())}` : ""}</small></div><span class="spacer"></span><button class="button button-danger button-sm" data-revoke="${esc(c.id)}">ยกเลิก</button></div>`).join("")}</div>
-          ${r.connections.length > 1 ? `<button class="button button-quiet button-sm" data-revoke-all style="justify-self:start">ยกเลิกทั้งหมด</button>` : ""}`
+          ${r.connections.length > 1 ? `<button class="button button-quiet button-sm" data-revoke-all style="justify-self:start">ยกเลิกทั้งหมด</button>` : ""}
+          <p class="faint" style="margin:0">แอป AI ได้ลิงก์ออนไลน์ของวิดีโอที่เรนเดอร์แล้ว (เปิดได้ 3 วัน ขณะที่ Sub360 และ tunnel เปิดอยู่ ใครมีลิงก์ก็เปิดได้) <button class="link-button" data-reset-links>ยกเลิกลิงก์ที่เคยให้ไปทั้งหมด</button></p>`
         : `<p class="faint" style="margin:0">ยังไม่มี — กด "เชื่อมแอป AI ใหม่" แล้วเพิ่มที่อยู่ข้างบนในแอป AI</p>`}</div>
     </div>`;
     hydrateIcons($("#remote-live"));
@@ -2511,6 +2519,11 @@ async function pageConnect() {
       if (t.matches("[data-revoke-all]")) {
         if (!(await confirmBox("ยกเลิกทุกการเชื่อมต่อ?", "ทุกแอป AI บนคลาวด์จะสั่งงาน Sub360 ไม่ได้ทันที", "ยกเลิกทั้งหมด", "button-danger"))) return;
         r = await api("/mcp/remote/connections", { method: "DELETE" });
+      }
+      if (t.matches("[data-reset-links]")) {
+        if (!(await confirmBox("ยกเลิกลิงก์ออนไลน์ทั้งหมด?", "ลิงก์วิดีโอและซับที่เคยให้แอป AI ไปจะเปิดไม่ได้ทันที แอป AI ขอลิงก์ใหม่ได้จากโปรเจกต์เดิม", "ยกเลิกลิงก์", "button-danger"))) return;
+        r = await api("/mcp/remote/links", { method: "DELETE" });
+        toast("ยกเลิกลิงก์ทั้งหมดแล้ว");
       }
       paintLive();
     } catch (error) {
@@ -2710,6 +2723,19 @@ hydrateIcons();
 window.addEventListener("hashchange", route);
 refreshStatus();
 setInterval(refreshSidebar, 5000);
+// แอป AI บนคลาวด์เปิดหน้าขอเชื่อมต่อ → พาไปหน้าเชื่อมต่อ AI ที่แสดงรหัส (แอป Windows ดึงหน้าต่างขึ้นมาให้ด้วย)
+let pairingSeen = "";
+setInterval(async () => {
+  try {
+    const { open } = await api("/mcp/remote/pairing");
+    const key = open?.requesters?.length ? `${open.code}:${open.requesters.length}` : "";
+    if (key && key !== pairingSeen && !location.hash.startsWith("#/connect")) {
+      toast("แอป AI ขอเชื่อมต่อ — รหัสอยู่ในหน้าเชื่อมต่อ AI");
+      location.hash = "#/connect";
+    }
+    pairingSeen = key;
+  } catch { /* เซิร์ฟเวอร์ปิดอยู่ */ }
+}, 3000);
 if (desktop) {
   desktop.onUpdate(onUpdateState);
   desktop.updateState().then(onUpdateState).catch(() => {});

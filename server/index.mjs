@@ -659,6 +659,8 @@ const mcp = createMcp({
     api: createLocalApi(() => baseUrl),
     catalog: { styles: listStyles, colorSets: CAPTION_COLOR_SETS, languages: TRANSLATE_LANGS },
     projectDir: (id) => store.projectDir(id),
+    // ลิงก์ออนไลน์ของไฟล์ผลลัพธ์ผ่าน tunnel (null เมื่อไม่ได้เปิดแอป AI บนคลาวด์)
+    fileLinks: (project) => remote.fileLinks(project.id, Object.keys(project.result?.files || {})),
     showProject: async (id) => {
       const hash = id ? `#/p/${id}` : "#/";
       if (process.send) {
@@ -677,6 +679,20 @@ const remote = createRemote({
   mcp,
   findCloudflared: () => cloudflared(),
   getToken: () => process.env.SUB360_TUNNEL_TOKEN || "",
+  // แอป AI เปิดหน้าขอเชื่อมต่อ → ดึงหน้าต่างขึ้นมาที่หน้าเชื่อมต่อ AI ซึ่งแสดงรหัส
+  onAttention: () => process.send?.({ type: "attention", hash: "#/connect" }),
+  // ไฟล์ที่ลิงก์ออนไลน์เปิดได้: เฉพาะไฟล์ผลลัพธ์ที่เรนเดอร์แล้วในโฟลเดอร์ out/ ของโปรเจกต์
+  files: {
+    resolve(id, kind) {
+      let project;
+      try { project = store.read(id); } catch { return null; }
+      const file = project.result?.files?.[kind];
+      const spec = DOWNLOADS[kind];
+      if (!file || !spec) return null;
+      const suffix = kind === "srtTranslated" && project.translation?.lang ? `.${project.translation.lang}.srt` : spec.suffix;
+      return { path: path.join(store.projectDir(id), "out", path.basename(file)), name: `${project.title}${suffix}` };
+    },
+  },
 });
 
 // ตรวจ cloudflared ด้วยการรันโปรแกรม — เก็บผลไว้ หน้าเชื่อมต่อ AI ถามสถานะทุก 2 วินาที
@@ -725,6 +741,13 @@ async function handleRemoteApi(req, res, rest, method) {
   }
   if (rest[0] === "pairing" && method === "DELETE") {
     remote.cancelPairing();
+    return sendJson(res, 200, await remoteStatus());
+  }
+  // เบา ๆ ให้หน้าต่างถามทุกไม่กี่วินาที: มีแอป AI รอรหัสอยู่ไหม (เปิดผ่านเบราว์เซอร์ไม่มี Electron ดึงหน้าต่างให้)
+  if (rest[0] === "pairing" && method === "GET") return sendJson(res, 200, remote.pairingStatus());
+  // ยกเลิกลิงก์ออนไลน์ทั้งหมดที่เคยให้แอป AI ไป (เปลี่ยนกุญแจลายเซ็น)
+  if (rest[0] === "links" && method === "DELETE") {
+    remote.resetFileLinks();
     return sendJson(res, 200, await remoteStatus());
   }
   if (rest[0] === "connections" && method === "DELETE") {

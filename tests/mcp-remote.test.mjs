@@ -173,17 +173,40 @@ test("ลงทะเบียน: รับเฉพาะ https หรือ l
   assert.equal(({}).revokedAt, undefined, "ไม่มี prototype pollution");
 });
 
-test("ไม่ได้กดเริ่มใน Sub360 → หน้าขออนุญาตใช้ไม่ได้ ไม่มีอะไรรอให้ใครกด", async () => {
-  const clientId = await register("ChatGPT");
-  const c = await consent(clientId);
-  assert.match(c.html, /ChatGPT/);
-  assert.match(c.html, /chatgpt\.com/);
+test("แอป AI เปิดหน้าขอเชื่อมต่อ → รหัสขึ้นในหน้าต่าง Sub360 เอง (ไม่อยู่ในหน้าเว็บ) แล้วพิมพ์ต่อได้เลย", async () => {
+  const clientId = await register("Claude");
+  const c = await consent(clientId, "st", "https://chatgpt.com/connector_platform_oauth_redirect");
   assert.match(c.csp, /form-action 'none'/);
   assert.doesNotMatch(c.html, /ไม่ใช่แอป AI ที่ Sub360 รู้จัก/);
-  const r = await submit(c, { code: "123456" });
-  assert.equal(r.status, 409);
-  assert.match(r.body.error, /เชื่อมแอป AI ใหม่/);
-  assert.equal((await appApi("GET", "/mcp/remote")).body.connections.length, 0);
+  const { body: p } = await appApi("GET", "/mcp/remote/pairing");
+  assert.ok(p.open, "เปิดรอบจับคู่ให้เอง");
+  assert.equal(p.open.auto, true);
+  assert.deepEqual(p.open.requesters.map((x) => [x.clientName, x.redirectHost]), [["Claude", "chatgpt.com"]]);
+  assert.ok(!c.html.includes(p.open.code), "รหัสต้องไม่อยู่ในหน้าเว็บที่ใครก็เปิดได้");
+  // เปิดหน้าซ้ำ (รีเฟรช) ไม่เปลี่ยนรหัส
+  await consent(clientId);
+  assert.equal((await appApi("GET", "/mcp/remote/pairing")).body.open.code, p.open.code);
+  const ok = await submit(c, { code: p.open.code });
+  assert.ok(ok.body.redirect, JSON.stringify(ok.body));
+  assert.equal((await appApi("GET", "/mcp/remote/pairing")).body.open, null, "ใช้แล้วปิด");
+});
+
+test("พิมพ์รหัสผิดเกิน 10 ครั้ง → หยุดเปิดรหัสอัตโนมัติชั่วคราว ปุ่มในแอปยังใช้ได้", async () => {
+  const clientId = await register("Guesser");
+  const c = await consent(clientId);
+  const { code } = (await appApi("GET", "/mcp/remote/pairing")).body.open;
+  const wrong = code === "999999" ? "999998" : "999999";
+  let last;
+  for (let i = 0; i < 10; i += 1) last = await submit(c, { code: wrong });
+  assert.match(last.body.error, /หลายครั้งเกินไป/);
+  await consent(clientId);
+  const locked = (await appApi("GET", "/mcp/remote/pairing")).body;
+  assert.equal(locked.open, null, "เปิดหน้าใหม่ก็ไม่ได้รหัสใหม่");
+  assert.ok(locked.autoLockedUntil > Date.now());
+  assert.equal((await submit(c, { code })).status, 409);
+  const manual = await startPairing();
+  assert.ok((await submit(c, { code: manual })).body.redirect, "คนกดเริ่มเองในแอปได้เสมอ");
+  assert.equal((await appApi("GET", "/mcp/remote/pairing")).body.autoLockedUntil, null);
 });
 
 test("OAuth ครบวงจร: กดเริ่มในแอป → พิมพ์รหัส → โทเค็น → tools → refresh → ยกเลิกในแอป", async () => {
@@ -295,16 +318,54 @@ test("ปลายทางที่ไม่รู้จัก → หน้า
   assert.match(c.html, /ไม่ใช่แอป AI ที่ Sub360 รู้จัก/);
 });
 
-test("รหัสผิดเกิน 10 ครั้ง → ปิดการจับคู่ ต้องเริ่มใหม่ในแอป", async () => {
-  const clientId = await register("Guess");
-  const c = await consent(clientId);
-  const code = await startPairing();
-  const wrong = code === "999999" ? "999998" : "999999";
-  let last;
-  for (let i = 0; i < 10; i += 1) last = await submit(c, { code: wrong });
-  assert.match(last.body.error, /หลายครั้งเกินไป/);
-  assert.equal((await submit(c, { code })).status, 409, "รหัสถูกก็ใช้ไม่ได้แล้ว");
-  assert.equal((await appApi("GET", "/mcp/remote")).body.pairing.open, null);
+test("ผลลัพธ์เป็นลิงก์ออนไลน์: ลายเซ็นถูก เปิดได้ (รองรับเลื่อนวิดีโอ) · ลิงก์ปลอม/หมดอายุ/ยกเลิกแล้วเปิดไม่ได้", async () => {
+  // โปรเจกต์ที่เรนเดอร์แล้ว (สร้างไฟล์ตรง ๆ ไม่ต้องรอเรนเดอร์จริง — การเรนเดอร์ทดสอบใน mcp.test.mjs)
+  const id = "fakeproj01";
+  const dir = path.join(HOME, "data", "projects", id);
+  fs.mkdirSync(path.join(dir, "out"), { recursive: true });
+  const video = Buffer.from(Array.from({ length: 5000 }, (_, i) => i % 251));
+  fs.writeFileSync(path.join(dir, "out", "final.mp4"), video);
+  fs.writeFileSync(path.join(dir, "out", "captions.srt"), "1\n00:00:00,000 --> 00:00:01,000\n<script>x</script>\n");
+  const now = Date.now();
+  fs.writeFileSync(path.join(dir, "project.json"), JSON.stringify({
+    id, title: "คลิปทดสอบ", createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(), status: "rendered",
+    settings: { style: "karaoke-pop", colorSet: null, anchor: null, fontScale: 1, language: "th" },
+    source: { file: "source.mp4", name: "x.mp4", size: 10 }, meta: { durationMs: 4000, width: 320, height: 240, hasAudio: true },
+    timeline: { chunks: [{ id: "c1", text: "ทดสอบ", startMs: 0, endMs: 1000, words: [] }] }, job: null, editedAt: now - 5000,
+    result: { files: { mp4: "final.mp4", srt: "captions.srt" }, at: now, warnings: [] },
+  }));
+
+  const { tokens } = await connect("Links");
+  const got = await (await mcpCall(tokens.access_token, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_project", arguments: { id } } })).json();
+  const out = got.result.structuredContent.output;
+  assert.ok(out.online_urls?.mp4?.startsWith(`${GW}/files/${id}/mp4?`), JSON.stringify(out));
+  assert.match(got.result.structuredContent.next, /online_urls\.mp4/);
+
+  const full = await fetch(out.online_urls.mp4);
+  assert.equal(full.status, 200);
+  assert.equal(full.headers.get("content-type"), "video/mp4");
+  assert.match(full.headers.get("content-disposition"), /^inline; filename\*=UTF-8''/);
+  assert.deepEqual(Buffer.from(await full.arrayBuffer()), video);
+  const part = await fetch(out.online_urls.mp4, { headers: { range: "bytes=100-199" } });
+  assert.equal(part.status, 206);
+  assert.deepEqual(Buffer.from(await part.arrayBuffer()), video.subarray(100, 200));
+  const srt = await fetch(out.online_urls.srt);
+  assert.match(srt.headers.get("content-security-policy"), /sandbox/, "ข้อความซับเปิดเป็นหน้าเว็บไม่ได้");
+
+  const u = new URL(out.online_urls.mp4);
+  const tampered = `${GW}/files/${id}/srt?e=${u.searchParams.get("e")}&s=${u.searchParams.get("s")}`;
+  assert.equal((await fetch(tampered)).status, 403, "ลายเซ็นผูกกับไฟล์นั้น");
+  const { createHmac } = await import("node:crypto");
+  const key = JSON.parse(fs.readFileSync(path.join(HOME, "mcp-remote.json"), "utf8")).linkKey;
+  const sign = (kind, e) => createHmac("sha256", key).update(`${id}\n${kind}\n${e}`).digest("base64url");
+  const past = Math.floor(Date.now() / 1000) - 10;
+  assert.equal((await fetch(`${GW}/files/${id}/mp4?e=${past}&s=${sign("mp4", past)}`)).status, 403, "หมดอายุ");
+  const later = Math.floor(Date.now() / 1000) + 600;
+  assert.equal((await fetch(`${GW}/files/${id}/ass?e=${later}&s=${sign("ass", later)}`)).status, 404, "ไฟล์ที่ไม่ได้เรนเดอร์ไม่มีให้เปิด");
+  assert.equal(await rawGet(`/files/${id}/mp4?e=${u.searchParams.get("e")}&s=${u.searchParams.get("s")}`, "evil.example"), 421);
+
+  await appApi("DELETE", "/mcp/remote/links");
+  assert.equal((await fetch(out.online_urls.mp4)).status, 403, "ยกเลิกลิงก์ทั้งหมดแล้วเปิดไม่ได้");
 });
 
 test("code ใช้ซ้ำ = รั่ว → ยกเลิกการเชื่อมนั้นทั้งหมด", async () => {
