@@ -57,7 +57,9 @@ export function compileComposition(timeline, style, { width, height, fps = 30, m
         ? "top: 50%; bottom: auto; transform: translateY(-50%);"
         : `bottom: ${marginV}px; top: auto;`;
 
-  // ท่อนที่ยาวกว่าเกณฑ์จะย่อฟอนต์ลงพอดีหนึ่งบรรทัด — ปล่อยให้ตัดบรรทัดเองจะได้คำโดด ๆ ห้อยอยู่
+  // ท่อนที่ยาวกว่าเกณฑ์จะย่อฟอนต์ลงพอดีหนึ่งบรรทัดก่อน — ตัดบรรทัดเร็วไปจะได้คำโดด ๆ ห้อยอยู่
+  // แต่ย่อได้ไม่เกิน 68% ถ้ายังไม่พอ (เช่นผู้ใช้ขยายตัวอักษร 140%) .line จะตัดขึ้นบรรทัดใหม่ตรงรอยต่อคำ
+  // แทนที่จะล้นออกนอกจอ แบบเดียวกับซับแบบเร็ว (libass)
   // (ประมาณจากจำนวน grapheme พอใช้ได้กับไทย เพราะความกว้างต่อตัวค่อนข้างสม่ำเสมอ)
   const FIT_CHARS = p.fitChars ?? 14;
   const fitScale = (n) => Math.max(0.68, Math.min(1, FIT_CHARS / Math.max(1, n)));
@@ -146,8 +148,9 @@ export function compileComposition(timeline, style, { width, height, fps = 30, m
       }
       .line {
         display: flex;
-        flex-wrap: nowrap;
+        flex-wrap: wrap;
         justify-content: center;
+        align-content: center;
         align-items: flex-end;
         max-width: 100%;
         font-size: ${p.font.size}px;
