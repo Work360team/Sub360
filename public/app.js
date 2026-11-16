@@ -46,6 +46,9 @@ const ICONS = {
   key: '<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M17 6l3 3M15 8l2 2"/>',
   shield: '<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/>',
   external: '<path d="M14 4h6v6M20 4 10 14M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
+  plug: '<path d="M9 2v6M15 2v6"/><path d="M6 8h12v3a6 6 0 0 1-12 0z"/><path d="M12 17v5"/>',
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
+  cloud: '<path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.8A6 6 0 0 0 4.5 12.5 3.5 3.5 0 0 0 6 19z"/>',
 };
 const icon = (name, cls = "") => `<i data-icon="${name}"${cls ? ` class="${cls}"` : ""}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICONS[name] || ""}</svg></i>`;
 function hydrateIcons(root = document) {
@@ -604,6 +607,7 @@ async function route() {
     else if (head === "styles") await pageStyles();
     else if (head === "setup") await pageSetup();
     else if (head === "settings") await pageSettings();
+    else if (head === "connect") await pageConnect();
     else await pageHome();
   } catch (error) {
     view().innerHTML = `<div class="page"><div class="form-alert error">${icon("alert")}<div>${esc(error.message)}</div></div></div>`;
@@ -1121,9 +1125,18 @@ async function pageProject(id) {
     pollTimer = setInterval(async () => {
       try {
         const wasActive = JOB_ACTIVE(project);
+        const seenEdit = project.editedAt;
         const res = await api(`/projects/${id}`);
         project = res.project;
         renderHead();
+        // แอป AI (MCP) แก้ซับหรือการตั้งค่าจากข้างนอก — โหลดฉบับล่าสุดถ้าผู้ใช้ไม่ได้พิมพ์ค้างอยู่
+        // (หน้าต่างอัปเดต project ทุกครั้งที่บันทึกเอง ค่าที่ต่างจึงมาจากที่อื่นเท่านั้น)
+        if (project.editedAt !== seenEdit && !wasActive && !JOB_ACTIVE(project)
+          && edit.version === edit.saved && !edit.saving) {
+          reloadChunks();
+          toast("มีการแก้จากแอป AI — แสดงฉบับล่าสุดแล้ว");
+          return go(step);
+        }
         stepApi.onJob?.();
         if (wasActive && !JOB_ACTIVE(project)) {
           const j = project.job || {};
@@ -2313,6 +2326,211 @@ async function pageSettings() {
   });
 }
 
+/* ---------- เชื่อมต่อ AI (MCP) ---------- */
+// แอป AI ในเครื่อง: คัดลอก config ไปวาง (stdio) · แอป AI บนคลาวด์: เปิด gateway + Cloudflare Tunnel แล้วอนุมัติทีละแอป
+// รายละเอียดการออกแบบ: docs/MCP_PLAN.md · คู่มือผู้ใช้: docs/AI_CONNECT.md
+
+function localSnippets(cfg) {
+  const server = { command: cfg.command, args: cfg.args, env: cfg.env };
+  const json = JSON.stringify({ mcpServers: { sub360: server } }, null, 2);
+  const shq = (s) => (/[\s"'&()]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s);
+  const envFlags = Object.entries(cfg.env).map(([k, v]) => `-e ${k}=${shq(v)}`).join(" ");
+  const toml = (s) => (s.includes("'") ? JSON.stringify(s) : `'${s}'`);
+  return [
+    { id: "claude-desktop", name: "Claude Desktop", where: "เปิด Claude Desktop → Settings → Developer → Edit Config แล้ววางในไฟล์ <code>claude_desktop_config.json</code> (ถ้ามี <code>mcpServers</code> อยู่แล้ว ให้เพิ่มเฉพาะส่วน <code>\"sub360\"</code>) แล้วปิดเปิด Claude ใหม่", code: json },
+    { id: "claude-code", name: "Claude Code", where: "รันคำสั่งนี้ในเทอร์มินัลครั้งเดียว แล้วเปิด Claude Code ใหม่", code: `claude mcp add sub360 --scope user ${envFlags} -- ${[cfg.command, ...cfg.args].map(shq).join(" ")}` },
+    { id: "codex", name: "Codex", where: "วางท้ายไฟล์ <code>~/.codex/config.toml</code>", code: `[mcp_servers.sub360]\ncommand = ${toml(cfg.command)}\nargs = [${cfg.args.map(toml).join(", ")}]\nenv = { ${Object.entries(cfg.env).map(([k, v]) => `${k} = ${toml(v)}`).join(", ")} }` },
+    { id: "gemini-cli", name: "Gemini CLI", where: "วางใน <code>~/.gemini/settings.json</code> (ส่วน <code>mcpServers</code>)", code: json },
+    { id: "other", name: "Cursor / อื่น ๆ", where: "แอปที่ใช้รูปแบบ <code>mcpServers</code> เดียวกัน วางในไฟล์ตั้งค่า MCP ของแอปนั้น", code: json },
+  ];
+}
+
+const CLOUD_APPS = [
+  ["ChatGPT", "Settings → Apps & Connectors → Advanced → เปิด Developer mode → Create → วางที่อยู่ เลือก OAuth (ไม่ต้องกรอก Client ID)"],
+  ["Claude (claude.ai / แอป)", "Settings → Connectors → Add custom connector → วางที่อยู่ → Connect"],
+  ["Gemini", "เมนูเชื่อมต่อแอป / MCP server ของ Gemini → วางที่อยู่"],
+];
+
+async function copyText(text, label = "คัดลอกแล้ว") {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(label);
+  } catch {
+    toast("คัดลอกไม่ได้ — เลือกข้อความแล้วกด Ctrl+C");
+  }
+}
+
+async function pageConnect() {
+  setPage("connect", "เชื่อมต่อ AI");
+  const [cfg, first] = await Promise.all([api("/mcp/local-config"), api("/mcp/remote")]);
+  let r = first;
+  let tab = store.get("mcpTab") || "claude-desktop";
+  const snippets = localSnippets(cfg);
+  const desktopApp = Boolean(cfg.env.ELECTRON_RUN_AS_NODE);
+
+  view().innerHTML = `<div class="page page-stack connect-page">
+    <div class="dashboard-heading"><div><p class="eyebrow">เชื่อมต่อ AI</p><h1 style="font-size:clamp(24px,2.6vw,32px)">สั่งงาน Sub360 จากแอป AI</h1>
+      <p class="sub">พิมพ์ในแชตได้เลย เช่น "ใส่ซับไทยให้คลิป D:\\clips\\รีวิว.mp4 สไตล์คาราโอเกะ แก้คำว่ามิสทีนให้ถูก แล้วเรนเดอร์" — งานเกิดใน Sub360 เครื่องนี้ และเห็นความคืบหน้าในหน้าต่างนี้</p></div></div>
+    <section class="panel" style="padding:21px">
+      <div class="section-heading"><div><h2>แอป AI ในเครื่องนี้</h2><p>Claude Desktop, Claude Code, Codex, Gemini CLI — เรียก Sub360 ตรงในเครื่อง วิดีโอไม่ออกจากเครื่อง ไม่ต้องมีบัญชีหรือโทเค็น</p></div><span class="quick-icon green">${icon("monitor")}</span></div>
+      <div class="seg" role="tablist" id="mcp-tabs">${snippets.map((s) => `<button role="tab" data-tab="${s.id}" class="${s.id === tab ? "on" : ""}" aria-selected="${s.id === tab}">${esc(s.name)}</button>`).join("")}</div>
+      <div id="mcp-snippet" style="margin-top:14px"></div>
+      <div class="form-alert" style="margin-top:14px">${icon("help")}<div>ถ้า Sub360 ยังไม่ได้เปิด แอป AI จะเปิดให้เองเมื่อสั่งงานครั้งแรก · AI ลบโปรเจกต์ ติดตั้งเครื่องมือ หรือใส่ API key แทนคุณไม่ได้ · งานที่ส่งข้อมูลไป Gemini (AI แก้คำ แปลซับ) จะถามคุณในแชตก่อนทุกครั้ง${desktopApp ? "" : "<br/>เปิดผ่านเบราว์เซอร์ (เริ่มโปรแกรม.bat) — คำสั่งนี้ใช้ Node ในเครื่อง ถ้าติดตั้งแอป Sub360 แล้ว ให้คัดลอกจากในแอปแทน"}</div></div>
+    </section>
+    <section class="panel" style="padding:21px">
+      <div class="section-heading"><div><h2>แอป AI บนคลาวด์</h2><p>ChatGPT, Gemini, claude.ai — ผ่าน Cloudflare Tunnel ให้ที่อยู่ https ที่เปิดเฉพาะช่องสั่งงาน AI (ไม่เปิดหน้าแอปหรือไฟล์) และทุกแอปต้องได้รับอนุญาตจากหน้าต่างนี้ก่อน</p></div><span class="quick-icon purple">${icon("cloud")}</span></div>
+      <div id="remote-form"></div>
+      <div id="remote-live"></div>
+    </section>
+  </div>`;
+
+  const paintSnippet = () => {
+    const s = snippets.find((x) => x.id === tab) || snippets[0];
+    $("#mcp-snippet").innerHTML = `<p class="muted" style="font-size:13px;margin:0 0 8px">${s.where}</p>
+      <div class="code-box"><pre><code>${esc(s.code)}</code></pre><button class="button button-sm button-quiet code-copy" data-copy-snippet>${icon("copy")}คัดลอก</button></div>`;
+    hydrateIcons($("#mcp-snippet"));
+  };
+  paintSnippet();
+  $("#mcp-tabs").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-tab]");
+    if (!b) return;
+    tab = b.dataset.tab;
+    store.set("mcpTab", tab);
+    $$("#mcp-tabs button").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-selected", String(x === b)); });
+    paintSnippet();
+  });
+  $("#mcp-snippet").addEventListener("click", (e) => {
+    if (e.target.closest("[data-copy-snippet]")) copyText(snippets.find((x) => x.id === tab).code, "คัดลอกแล้ว — ไปวางในแอป AI ได้เลย");
+  });
+
+  /* ----- คลาวด์: ส่วนตั้งค่า (วาดใหม่เมื่อกดเท่านั้น จะได้ไม่ทับช่องที่กำลังพิมพ์) ----- */
+  const installing = () => r.install?.state === "running";
+  function paintForm() {
+    const cf = r.cloudflared || {};
+    $("#remote-form").innerHTML = `<div class="step-body" style="gap:14px">
+      <label class="toggle"><input type="checkbox" id="remote-on" ${r.enabled ? "checked" : ""} /><div><b>เปิดให้แอป AI บนคลาวด์เชื่อมต่อ</b><small>ปิดเมื่อไร tunnel หยุดทันที · การเชื่อมที่อนุญาตไว้ยังอยู่ ยกเลิกได้ด้านล่าง</small></div></label>
+      ${r.enabled ? `
+      <div class="check-row"><span class="pill ${cf.ready ? "green" : "red"}">${cf.ready ? `${icon("check")}พร้อม` : "ยังไม่มี"}</span><div><b>cloudflared</b><small>${cf.ready ? `รุ่น ${esc(cf.version)}` : "โปรแกรมของ Cloudflare ที่ทำ tunnel (~60 MB)"}</small></div>
+        ${cf.ready ? "" : `<span class="spacer"></span><button class="button button-primary button-sm" id="cf-install" ${installing() ? "disabled" : ""}>${installing() ? '<span class="spinner"></span>กำลังติดตั้ง' : `${icon("download")}ติดตั้ง`}</button>`}</div>
+      ${installing() ? `<div class="progress"><span style="width:${r.install.pct || 0}%"></span></div><p class="faint">${esc(r.install.message || "")}</p>` : ""}
+      ${r.install?.state === "failed" ? `<div class="form-alert error">${icon("alert")}<div>${esc(r.install.error)}</div></div>` : ""}
+      <div class="field"><span>ที่อยู่สำหรับแอป AI</span>
+        <div class="seg" id="remote-mode"><button data-mode="quick" class="${r.mode !== "named" ? "on" : ""}">ชั่วคราว (ไม่ต้องมีบัญชี)</button><button data-mode="named" class="${r.mode === "named" ? "on" : ""}">ถาวร (โดเมนบน Cloudflare)</button></div></div>
+      ${r.mode === "named" ? `
+        <div class="form-alert">${icon("help")}<div>ใน Cloudflare Zero Trust → Networks → Tunnels → สร้าง tunnel แล้วเพิ่ม Public Hostname ให้ชี้ไปที่ <code>http://localhost:${r.gateway?.port || 4370}</code> จากนั้นคัดลอกคำสั่งติดตั้ง (ที่มีโทเค็น <code>eyJ…</code>) มาวางที่นี่</div></div>
+        <label class="field"><span>ชื่อโดเมน</span><input class="input" id="remote-host" placeholder="sub360.example.com" value="${esc(r.hostname)}" autocomplete="off" /></label>
+        <label class="field"><span>โทเค็น tunnel ${r.hasToken ? "<small>บันทึกไว้แล้ว — วางใหม่เพื่อเปลี่ยน</small>" : ""}</span><input class="input" id="remote-token" type="password" placeholder="${r.hasToken ? "••••••••" : "วางคำสั่งหรือโทเค็น eyJ…"}" autocomplete="off" /></label>
+        <div class="row"><button class="button button-primary" id="remote-save">บันทึกและเชื่อมต่อ</button></div>`
+      : `<p class="faint">ที่อยู่ชั่วคราวเปลี่ยนทุกครั้งที่เปิด Sub360 ใหม่ ต้องเพิ่มการเชื่อมต่อในแอป AI ใหม่ทุกครั้ง — เหมาะกับการลองใช้ ถ้าใช้ประจำให้ใช้แบบถาวร</p>`}` : ""}
+    </div>`;
+    hydrateIcons($("#remote-form"));
+  }
+
+  const stateLabel = { off: ["ปิดอยู่", ""], starting: ["กำลังเชื่อมต่อ…", "yellow"], connected: ["เชื่อมต่อแล้ว", "green"], error: ["มีปัญหา", "red"] };
+  const clockTime = (ms) => new Date(ms).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+
+  // การเชื่อมใหม่เริ่มที่นี่เสมอ: กดแล้วได้รหัสไปพิมพ์ในหน้าที่แอป AI เปิดขึ้นมา (คำขอที่คุณไม่ได้เริ่มจะไม่ผ่าน)
+  function pairingHtml(p) {
+    if (p.open) {
+      return `<div class="pending-card" role="status">
+        <div><b>พร้อมเชื่อมแอป AI ใหม่</b> <small class="faint">· ใช้ได้ครั้งเดียว ถึง ${clockTime(p.open.expiresAt)} น.</small></div>
+        <div class="pair-code" aria-label="รหัสเชื่อมต่อ">${esc(p.open.code)}</div>
+        <p class="muted" style="margin:0;font-size:13px">ในแอป AI กดเพิ่มการเชื่อมต่อด้วยที่อยู่ข้างบน แล้วพิมพ์รหัสนี้ในหน้าที่เปิดขึ้นมา</p>
+        <div class="form-alert">${icon("shield")}<div>อย่าบอกรหัสนี้กับใคร และอย่าพิมพ์ในเว็บที่คนอื่นส่งมาให้ — ใครได้รหัสไปจะสั่งงาน Sub360 บนเครื่องนี้ได้ (ยกเว้นลบโปรเจกต์)</div></div>
+        <div class="row"><button class="button button-quiet button-sm" data-pair-cancel>ยกเลิก</button></div></div>`;
+    }
+    const done = p.lastConnected && Date.now() - p.lastConnected.at < 10 * 60_000
+      ? `<div class="form-alert ok">${icon("check")}<div>เชื่อม <b>${esc(p.lastConnected.clientName)}</b> (${esc(p.lastConnected.redirectHost)}) แล้ว — ถ้าไม่ใช่แอปที่คุณเพิ่งเชื่อม ให้กดยกเลิกในรายการด้านล่าง</div></div>` : "";
+    return `${done}<div class="row" style="align-items:center;gap:12px"><button class="button button-primary" data-pair-start>${icon("plus")}เชื่อมแอป AI ใหม่</button>
+      <small class="faint" style="flex:1;min-width:200px">กดก่อนเพิ่มการเชื่อมต่อในแอป AI — จะได้รหัส 6 หลักไว้พิมพ์ในหน้าที่แอปเปิดขึ้นมา</small></div>`;
+  }
+  let liveKey = "";
+  function paintLive() {
+    if (!r.enabled) { $("#remote-live").innerHTML = ""; liveKey = ""; return; }
+    const key = JSON.stringify([r.tunnel, r.mcpUrl, r.problem, r.pairing, r.connections]);
+    if (key === liveKey) return;
+    liveKey = key;
+    const [label, cls] = stateLabel[r.tunnel?.state] || stateLabel.off;
+    $("#remote-live").innerHTML = `<div class="step-body" style="gap:14px;margin-top:16px">
+      <div class="check-row"><span class="pill ${cls}">${r.tunnel?.state === "starting" ? '<span class="spinner" style="width:10px;height:10px"></span>' : ""}${label}</span><div><b>Cloudflare Tunnel</b><small>${esc(r.problem || r.tunnel?.error || (r.mcpUrl ? "พร้อมรับการเชื่อมต่อ" : "รอสักครู่"))}</small></div>
+        ${r.tunnel?.state === "error" ? `<span class="spacer"></span><button class="button button-quiet button-sm" id="remote-restart">${icon("refresh")}ลองใหม่</button>` : ""}</div>
+      ${r.mcpUrl ? `<div class="field"><span>ที่อยู่ที่ต้องวางในแอป AI</span>
+        <div class="code-box"><pre><code>${esc(r.mcpUrl)}</code></pre><button class="button button-sm button-primary code-copy" data-copy-url>${icon("copy")}คัดลอก</button></div></div>
+        <div class="setting-block">${CLOUD_APPS.map(([n, how]) => `<div class="key-row" style="align-items:flex-start">${icon("external")}<div><b style="font-weight:500">${esc(n)}</b><br/><small class="faint">${esc(how)}</small></div></div>`).join("")}</div>` : ""}
+      ${r.mcpUrl ? pairingHtml(r.pairing || {}) : ""}
+      <div class="field"><span>แอปที่เชื่อมไว้</span>
+        ${r.connections.length ? `<div class="setting-block">${r.connections.map((c) => `<div class="key-row">${icon("plug")}<div><b style="font-weight:500">${esc(c.clientName)}</b> <small class="faint">${esc(c.redirectHost)} · เชื่อมเมื่อ ${fmtDate(new Date(c.createdAt).toISOString())}${c.lastUsedAt ? ` · ใช้ล่าสุด ${fmtDate(new Date(c.lastUsedAt).toISOString())}` : ""}</small></div><span class="spacer"></span><button class="button button-danger button-sm" data-revoke="${esc(c.id)}">ยกเลิก</button></div>`).join("")}</div>
+          ${r.connections.length > 1 ? `<button class="button button-quiet button-sm" data-revoke-all style="justify-self:start">ยกเลิกทั้งหมด</button>` : ""}`
+        : `<p class="faint" style="margin:0">ยังไม่มี — กด "เชื่อมแอป AI ใหม่" แล้วเพิ่มที่อยู่ข้างบนในแอป AI</p>`}</div>
+    </div>`;
+    hydrateIcons($("#remote-live"));
+  }
+
+  const apply = async (body) => {
+    try {
+      r = await api("/mcp/remote", { method: "PUT", body });
+      paintForm();
+      paintLive();
+    } catch (error) {
+      toast(error.message);
+    }
+  };
+  paintForm();
+  paintLive();
+
+  $("#remote-form").addEventListener("change", (e) => {
+    if (e.target.id === "remote-on") apply({ enabled: e.target.checked });
+  });
+  $("#remote-form").addEventListener("click", async (e) => {
+    const mode = e.target.closest("[data-mode]");
+    if (mode && mode.dataset.mode !== r.mode) return apply({ mode: mode.dataset.mode });
+    if (e.target.closest("#cf-install")) {
+      r.install = (await api("/setup/cloudflared", { method: "POST" })).installs.cloudflared;
+      return paintForm();
+    }
+    if (e.target.closest("#remote-save")) {
+      const body = { hostname: $("#remote-host").value };
+      if ($("#remote-token").value.trim()) body.token = $("#remote-token").value;
+      await apply(body);
+      if (!r.problem) toast("บันทึกแล้ว กำลังเชื่อมต่อ tunnel");
+    }
+  });
+  $("#remote-live").addEventListener("click", async (e) => {
+    const t = e.target.closest("button");
+    if (!t) return;
+    try {
+      if (t.matches("[data-copy-url]")) return copyText(r.mcpUrl, "คัดลอกที่อยู่แล้ว — ไปวางในแอป AI");
+      if (t.id === "remote-restart") r = await api("/mcp/remote/restart", { method: "POST" });
+      if (t.matches("[data-pair-start]")) r = await api("/mcp/remote/pairing", { method: "POST" });
+      if (t.matches("[data-pair-cancel]")) r = await api("/mcp/remote/pairing", { method: "DELETE" });
+      if (t.dataset.revoke) {
+        const c = r.connections.find((x) => x.id === t.dataset.revoke);
+        if (!(await confirmBox(`ยกเลิกการเชื่อมต่อ ${esc(c?.clientName || "")}?`, "แอปนี้จะสั่งงาน Sub360 ไม่ได้ทันที ถ้าต้องการใช้อีกต้องเชื่อมต่อและอนุญาตใหม่", "ยกเลิกการเชื่อมต่อ", "button-danger"))) return;
+        r = await api(`/mcp/remote/connections/${t.dataset.revoke}`, { method: "DELETE" });
+      }
+      if (t.matches("[data-revoke-all]")) {
+        if (!(await confirmBox("ยกเลิกทุกการเชื่อมต่อ?", "ทุกแอป AI บนคลาวด์จะสั่งงาน Sub360 ไม่ได้ทันที", "ยกเลิกทั้งหมด", "button-danger"))) return;
+        r = await api("/mcp/remote/connections", { method: "DELETE" });
+      }
+      paintLive();
+    } catch (error) {
+      toast(error.message);
+      r = await api("/mcp/remote");
+      paintLive();
+    }
+  });
+
+  const timer = setInterval(async () => {
+    try {
+      const wasInstalling = installing();
+      r = await api("/mcp/remote");
+      if (wasInstalling || installing()) paintForm();
+      paintLive();
+    } catch { /* ลองรอบหน้า */ }
+  }, 2000);
+  cleanup = () => clearInterval(timer);
+}
+
 /* ---------- อัปเดตโปรแกรม ---------- */
 // แอป Windows ตรวจและดาวน์โหลดเวอร์ชันใหม่เองอยู่เบื้องหลัง (electron/main.cjs) — ส่วนนี้ทำให้ผู้ใช้เห็นว่าถึงไหนแล้ว
 // การ์ดมุมขวาล่าง: ดาวน์โหลดกี่ % · พร้อมติดตั้ง · กำลังติดตั้ง · อัปเดตเสร็จแล้ว ส่วนหน้าตั้งค่ามีสถานะเต็มพร้อมปุ่มตรวจเอง
@@ -2495,5 +2713,10 @@ setInterval(refreshSidebar, 5000);
 if (desktop) {
   desktop.onUpdate(onUpdateState);
   desktop.updateState().then(onUpdateState).catch(() => {});
+  // แอป AI สั่ง show_in_sub360 → ไปหน้านั้น
+  desktop.onShow?.((hash) => {
+    if (location.hash === hash) route();
+    else location.hash = hash;
+  });
 }
 route();

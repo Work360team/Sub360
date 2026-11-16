@@ -9,3 +9,5 @@ samples/*.mov
 .DS_Store
 Thumbs.db
 dist/
+mcp-runtime.json
+mcp-remote.json

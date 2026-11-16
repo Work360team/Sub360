@@ -12,4 +12,10 @@ contextBridge.exposeInMainWorld("sub360App", {
     ipcRenderer.on("sub360:update", listener);
     return () => ipcRenderer.removeListener("sub360:update", listener);
   },
+  // แอป AI (MCP) สั่ง show_in_sub360 ให้เปิดหน้าโปรเจกต์
+  onShow(callback) {
+    const listener = (_event, hash) => callback(hash);
+    ipcRenderer.on("sub360:show", listener);
+    return () => ipcRenderer.removeListener("sub360:show", listener);
+  },
 });
