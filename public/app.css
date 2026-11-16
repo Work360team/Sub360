@@ -973,3 +973,19 @@ body.setup-mode .content-frame { width: 100%; margin-left: 0; }
   .setup-actions .setup-primary { flex: 1; }
   .ready-list > div { grid-template-columns: 18px 90px minmax(0, 1fr); }
 }
+
+/* ---------- เชื่อมต่อ AI (MCP) ---------- */
+.code-box { position: relative; min-width: 0; border: 1px solid var(--line); border-radius: 12px; background: #1a1e1a; }
+.code-box pre { margin: 0; padding: 14px 16px; padding-right: 108px; overflow-x: auto; color: #f5f4ef; font: 12.5px/1.6 ui-monospace, Consolas, monospace; white-space: pre; }
+.code-box pre code { padding: 0; border-radius: 0; background: none; color: inherit; font: inherit; }
+.code-box .code-copy { position: absolute; top: 8px; right: 8px; }
+.code-box .code-copy.button-quiet { background: #2b312b; color: #f5f4ef; }
+.connect-page .seg { max-width: 100%; }
+/* บรรทัดยาวใน <pre> ห้ามดันความกว้างหน้า — ไล่ min-width: 0 ตาม grid ทุกชั้นจนถึงกล่องโค้ด */
+.connect-page, .connect-page > *, .connect-page .step-body > *, .connect-page .field > *, #mcp-snippet { min-width: 0; }
+.pending-card { display: grid; gap: 10px; padding: 16px; border: 2px solid var(--yellow); border-radius: 16px; background: #fffbea; font-size: 13.5px; }
+.pair-code { font: 700 34px/1 ui-monospace, Consolas, monospace; letter-spacing: 0.18em; }
+@media (max-width: 640px) {
+  .code-box pre { padding-right: 16px; padding-top: 48px; }
+  .pair-code { font-size: 28px; }
+}

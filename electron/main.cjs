@@ -69,6 +69,8 @@ function startServer() {
     server.stderr.pipe(out);
     const timer = setTimeout(() => reject(new Error("server ไม่ตอบภายใน 60 วินาที")), 60_000);
     server.on("message", (msg) => {
+      // แอป AI (MCP) สั่ง show_in_sub360 → ดึงหน้าต่างขึ้นมาที่หน้านั้น
+      if (msg?.type === "show") return bringToFront(msg);
       if (msg?.type !== "ready") return;
       clearTimeout(timer);
       resolve(msg);
@@ -84,6 +86,14 @@ function startServer() {
       }
     });
   });
+}
+
+function bringToFront(msg) {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+  if (typeof msg.hash === "string" && /^#\/[\w/-]*$/.test(msg.hash)) win.webContents.send("sub360:show", msg.hash);
 }
 
 function stopServer() {

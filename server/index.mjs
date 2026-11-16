@@ -8,6 +8,7 @@ import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { pipeline as streamPipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { ffmpeg, loadEnv } from "../pipeline/lib.mjs";
@@ -18,9 +19,16 @@ import {
 } from "../pipeline/index.mjs";
 import { createStore } from "./store.mjs";
 import {
-  cancelInstall, exposeBinOnPath, homeDir, installFfmpeg, installWhisper, invalidateSetupStatus, setEnvValue as writeEnv, setupStatus,
+  cancelInstall, checkCloudflared, exposeBinOnPath, homeDir, installCloudflared, installFfmpeg, installState, installWhisper,
+  invalidateSetupStatus, setEnvValue as writeEnv, setupStatus,
 } from "./setup.mjs";
+import { createRemote, extractTunnelToken, normalizeHostname } from "./mcp/remote.mjs";
 import { appVersion } from "./version.mjs";
+import { createMcp } from "./mcp/protocol.mjs";
+import { createTools, INSTRUCTIONS as MCP_INSTRUCTIONS } from "./mcp/tools.mjs";
+import { createLocalApi } from "./mcp/local-api.mjs";
+import { serveMcp } from "./mcp/http.mjs";
+import { clearRuntime, writeRuntime } from "./mcp/runtime.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // ที่เก็บงานและการตั้งค่า — แยกจากโค้ดได้ด้วย SUB360_HOME (แอป Windows ใช้ %LOCALAPPDATA%\Sub360)
@@ -306,6 +314,9 @@ function view(project) {
   return { ...rest, preparedStyle: style };
 }
 
+/** เปลี่ยนทุกครั้งที่ซับหรือการตั้งค่าที่มีผลต่อวิดีโอเปลี่ยน (ไม่เปลี่ยนตามความคืบหน้าของงาน) */
+const contentVersion = (project) => String(project.editedAt ?? project.createdAt ?? "");
+
 function httpError(status, message) {
   return Object.assign(new Error(message), { status });
 }
@@ -393,6 +404,9 @@ async function handleApi(req, res, url) {
   if (parts[1] === "status" && method === "GET") {
     return sendJson(res, 200, { ...(await toolStatus()), queue: queue.length, current: current?.id ?? null });
   }
+  if (parts[1] === "mcp" && parts[2] === "local-config" && method === "GET") {
+    return sendJson(res, 200, localMcpConfig());
+  }
   if (parts[1] === "styles" && method === "GET") {
     return sendJson(res, 200, { styles: listStyles(), colorSets: CAPTION_COLOR_SETS, languages: TRANSLATE_LANGS });
   }
@@ -405,12 +419,17 @@ async function handleApi(req, res, url) {
       const { model } = await readJson(req, 1024);
       return sendJson(res, 202, { installs: installWhisper(ROOT, ENV_FILE, model) });
     }
+    if (parts[2] === "cloudflared" && method === "POST") {
+      cloudflaredCache = null;
+      return sendJson(res, 202, { installs: installCloudflared(ROOT) });
+    }
     if (parts[2] === "cancel" && method === "POST") {
       const { name } = await readJson(req, 1024);
-      if (["ffmpeg", "whisper"].includes(name)) cancelInstall(name);
+      if (["ffmpeg", "whisper", "cloudflared"].includes(name)) cancelInstall(name);
       return sendJson(res, 200, { ok: true });
     }
   }
+  if (parts[1] === "mcp" && parts[2] === "remote") return handleRemoteApi(req, res, parts.slice(3), method);
   if (parts[1] === "settings" && parts[2] === "gemini") {
     if (method === "GET") return sendJson(res, 200, geminiStatus());
     if (method === "PUT") {
@@ -512,6 +531,10 @@ async function handleApi(req, res, url) {
       throw httpError(409, "AI กำลังทำงานกับซับนี้อยู่ รอสักครู่แล้วแก้ต่อได้");
     }
     const body = await readJson(req);
+    // แอป AI (MCP) ส่ง version ที่อ่านไปมาด้วย — ผู้ใช้แก้ในหน้าต่างระหว่างนั้นจะไม่ถูกทับเงียบ ๆ
+    if (body.expectVersion !== undefined && String(body.expectVersion) !== contentVersion(project)) {
+      throw httpError(409, "ซับถูกแก้จากที่อื่นหลังจากที่อ่านไป — อ่านใหม่แล้วแก้อีกครั้ง");
+    }
     project.timeline = withIds(mergeEditedTimeline(project, body.chunks));
     project.editedAt = Date.now();
     return sendJson(res, 200, { project: view(store.write(project)) });
@@ -618,12 +641,125 @@ function serveStatic(req, res, url) {
   return sendFile(req, res, file, { cache: rel.startsWith("/fonts/") ? "max-age=86400" : "no-cache" });
 }
 
+/* ---------- MCP: ให้แอป AI สั่งงาน (docs/MCP_PLAN.md) ---------- */
+// แอป AI ในเครื่องคุยผ่าน server/mcp-stdio.mjs ซึ่งส่งต่อมาที่ POST /mcp พร้อมกุญแจใน mcp-runtime.json
+// tools เรียก /api ชุดเดียวกับหน้าต่าง จึงใช้คิวงาน การตรวจ และสถานะ "กำลังทำ" ร่วมกัน
+const MCP_KEY = randomBytes(32).toString("base64url");
+let baseUrl = "";
+const mcp = createMcp({
+  version: VERSION.version || VERSION.label || "0",
+  instructions: MCP_INSTRUCTIONS,
+  tools: createTools({
+    api: createLocalApi(() => baseUrl),
+    catalog: { styles: listStyles, colorSets: CAPTION_COLOR_SETS, languages: TRANSLATE_LANGS },
+    projectDir: (id) => store.projectDir(id),
+    showProject: async (id) => {
+      const hash = id ? `#/p/${id}` : "#/";
+      if (process.send) {
+        process.send({ type: "show", hash });
+        return { shown: true, note: "The Sub360 window is now showing it." };
+      }
+      openInBrowser(`${baseUrl}/${hash}`);
+      return { shown: true, url: `${baseUrl}/${hash}`, note: "Opened in the user's browser." };
+    },
+  }),
+});
+
+// แอป AI บนคลาวด์: gateway + Cloudflare Tunnel (ปิดเป็นค่าเริ่มต้น เปิดในหน้า "เชื่อมต่อ AI")
+const remote = createRemote({
+  home: HOME,
+  mcp,
+  findCloudflared: () => cloudflared(),
+  getToken: () => process.env.SUB360_TUNNEL_TOKEN || "",
+});
+
+// ตรวจ cloudflared ด้วยการรันโปรแกรม — เก็บผลไว้ หน้าเชื่อมต่อ AI ถามสถานะทุก 2 วินาที
+let cloudflaredCache = null;
+async function cloudflared() {
+  if (cloudflaredCache && Date.now() - cloudflaredCache.at < 60_000 && installState().cloudflared.state !== "done") return cloudflaredCache.value;
+  const value = await checkCloudflared(ROOT);
+  cloudflaredCache = { at: Date.now(), value };
+  return value;
+}
+
+async function remoteStatus() {
+  const install = installState().cloudflared;
+  if (install.state === "done") cloudflaredCache = null;
+  return { ...remote.status(), cloudflared: await cloudflared(), install };
+}
+
+/** /api/mcp/remote/* — เฉพาะหน้าต่าง Sub360 (พอร์ตหลัก) ไม่มีทางเรียกผ่าน tunnel */
+async function handleRemoteApi(req, res, rest, method) {
+  if (!rest.length && method === "GET") return sendJson(res, 200, await remoteStatus());
+  if (!rest.length && method === "PUT") {
+    const body = await readJson(req, 16 * 1024);
+    const patch = {};
+    if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
+    if (["quick", "named"].includes(body.mode)) patch.mode = body.mode;
+    if (typeof body.hostname === "string") {
+      if (body.hostname.trim() && !normalizeHostname(body.hostname)) throw httpError(400, "ชื่อโดเมนไม่ถูกต้อง — ใส่แบบ sub360.example.com");
+      patch.hostname = normalizeHostname(body.hostname) || "";
+    }
+    if (typeof body.token === "string") {
+      const token = body.token.trim() ? extractTunnelToken(body.token) : "";
+      if (body.token.trim() && !token) throw httpError(400, "ไม่พบโทเค็นในข้อความที่วาง — คัดลอกคำสั่งที่ขึ้นต้นด้วย eyJ… จากหน้า Cloudflare");
+      setEnvValue("SUB360_TUNNEL_TOKEN", token);
+    }
+    await remote.update(patch);
+    return sendJson(res, 200, await remoteStatus());
+  }
+  if (rest[0] === "restart" && method === "POST") {
+    await remote.restart();
+    return sendJson(res, 200, await remoteStatus());
+  }
+  // เชื่อมแอปใหม่ได้เฉพาะเมื่อคนกดเริ่มในหน้าต่างนี้ — แอป AI ได้รหัสจากคนที่พิมพ์เท่านั้น
+  if (rest[0] === "pairing" && method === "POST") {
+    if (!remote.startPairing()) throw httpError(409, "เปิดการเชื่อมต่อแอป AI บนคลาวด์ก่อน แล้วรอให้ tunnel พร้อม");
+    return sendJson(res, 200, await remoteStatus());
+  }
+  if (rest[0] === "pairing" && method === "DELETE") {
+    remote.cancelPairing();
+    return sendJson(res, 200, await remoteStatus());
+  }
+  if (rest[0] === "connections" && method === "DELETE") {
+    if (rest[1]) remote.revoke(rest[1]);
+    else remote.revokeAll();
+    return sendJson(res, 200, await remoteStatus());
+  }
+  throw httpError(404, "ไม่พบ API");
+}
+
+const sameKey = (given) => {
+  const a = Buffer.from(String(given || ""));
+  const b = Buffer.from(MCP_KEY);
+  return a.length === b.length && timingSafeEqual(a, b);
+};
+
+/** ค่า config ที่แอป AI ในเครื่องใช้เรียก Sub360 — หน้า "เชื่อมต่อ AI" แสดงให้คัดลอก */
+function localMcpConfig() {
+  const env = { SUB360_HOME: HOME };
+  // แอป Windows: Sub360.exe ทำตัวเป็น Node ได้ จึงไม่ต้องลง Node เพิ่ม
+  if (process.versions.electron) env.ELECTRON_RUN_AS_NODE = "1";
+  return { command: process.execPath, args: [path.join(ROOT, "server", "mcp-stdio.mjs")], env };
+}
+
+function openInBrowser(address) {
+  const opener = process.platform === "win32" ? ["cmd", ["/c", "start", "", address]]
+    : process.platform === "darwin" ? ["open", [address]] : ["xdg-open", [address]];
+  spawn(opener[0], opener[1], { detached: true, stdio: "ignore" }).unref();
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || HOST}`);
   // กัน DNS rebinding: หน้าเว็บอื่นจะยิงเข้ามาผ่านชื่อโดเมนของตัวเองไม่ได้
   const host = String(req.headers.host || "").replace(/:\d+$/, "");
   if (!["127.0.0.1", "localhost"].includes(host)) return sendJson(res, 403, { error: "forbidden host" });
   try {
+    if (url.pathname === "/mcp") {
+      // ต้องมีกุญแจจาก mcp-runtime.json และไม่ใช่คำขอจากหน้าเว็บอื่นในเบราว์เซอร์
+      if (req.headers.origin || !sameKey(req.headers["x-sub360-mcp-key"])) return sendJson(res, 403, { error: "forbidden" });
+      return await serveMcp(req, res, mcp, { remote: false, client: "local" });
+    }
     if (url.pathname.startsWith("/api/")) {
       if (req.method !== "GET" && req.method !== "HEAD" && req.headers["x-sub360"] !== "1") {
         throw httpError(403, "ต้องเรียกจากหน้าเว็บ Sub360");
@@ -658,6 +794,16 @@ let port = Number(process.env.SUB360_PORT || 4360);
 while (!(await portFree(port))) port += 1;
 server.listen(port, HOST, () => {
   const address = `http://${HOST}:${port}`;
+  baseUrl = address;
+  // ให้ stdio bridge ของแอป AI หาเราเจอ — ลบทิ้งตอนปิด (ไฟล์ค้างจากเครื่องดับ bridge จะตรวจเองว่าตอบไหม)
+  writeRuntime(HOME, { url: address, port, pid: process.pid, key: MCP_KEY, version: VERSION.version });
+  for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, () => process.exit(0));
+  process.on("exit", () => {
+    clearRuntime(HOME);
+    remote.stopSync(); // cloudflared ต้องไม่ค้างเปิดเน็ตไว้หลังปิดโปรแกรม
+  });
+  // เปิดแอป AI บนคลาวด์ไว้จากครั้งก่อน → ต่อ tunnel ให้เอง
+  remote.start().catch((error) => console.error(`[mcp-remote] ${error?.message || error}`));
   console.log(`\n  Sub360 ${VERSION.label} พร้อมใช้งานที่ ${address}\n  (ปิดหน้าต่างนี้เพื่อหยุดโปรแกรม)\n`);
   if (process.argv.includes("--open") && process.env.SUB360_NO_OPEN !== "1") {
     const opener = process.platform === "win32" ? ["cmd", ["/c", "start", "", address]]

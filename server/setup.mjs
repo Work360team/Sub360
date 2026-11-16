@@ -148,6 +148,7 @@ function findFile(root, wanted) {
 const installs = {
   ffmpeg: { state: "idle", pct: 0, message: "", error: null },
   whisper: { state: "idle", pct: 0, message: "", error: null },
+  cloudflared: { state: "idle", pct: 0, message: "", error: null },
 };
 const controllers = {};
 let statusCache = null;
@@ -398,6 +399,63 @@ export function installWhisper(root, envFile, modelKey = "large") {
     setEnvValue(envFile, "WHISPER_CLI_PATH", cli);
     setEnvValue(envFile, "WHISPER_MODEL_PATH", modelPath);
     progress(100, "ติดตั้งตัวถอดเสียงเรียบร้อย");
+  });
+}
+
+/* ---------- cloudflared (ให้แอป AI บนคลาวด์เชื่อมผ่าน Cloudflare Tunnel) ---------- */
+
+const CLOUDFLARED_ASSETS = {
+  "win32-x64": "cloudflared-windows-amd64.exe",
+  "win32-arm64": "cloudflared-windows-amd64.exe",
+  "linux-x64": "cloudflared-linux-amd64",
+  "linux-arm64": "cloudflared-linux-arm64",
+};
+
+/** cloudflared ที่ใช้ได้: ที่ตั้งใน .env → ที่ติดตั้งให้ใน data/bin → ใน PATH → ที่ตัวติดตั้งของ Cloudflare วางไว้ */
+export async function checkCloudflared(root) {
+  const local = path.join(binDir(root), `cloudflared${EXE}`);
+  const candidates = [
+    process.env.CLOUDFLARED_PATH,
+    fs.existsSync(local) ? local : null,
+    "cloudflared",
+    process.platform === "win32" ? path.join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "cloudflared", "cloudflared.exe") : null,
+    process.platform === "win32" ? path.join(process.env.ProgramFiles || "C:\\Program Files", "cloudflared", "cloudflared.exe") : null,
+    process.platform === "darwin" ? "/opt/homebrew/bin/cloudflared" : null,
+    process.platform === "darwin" ? "/usr/local/bin/cloudflared" : null,
+  ].filter(Boolean);
+  for (const candidate of [...new Set(candidates)]) {
+    if (path.isAbsolute(candidate) && !fs.existsSync(candidate)) continue;
+    const res = await runCli(candidate, ["--version"], { timeoutMs: 10_000 });
+    if (res.code === 0) {
+      return { ready: true, path: candidate, version: /version (\S+)/.exec(`${res.out} ${res.err}`)?.[1] || "?" };
+    }
+  }
+  return { ready: false, path: null, version: null };
+}
+
+export function installCloudflared(root) {
+  return startInstall("cloudflared", async (signal, progress) => {
+    const asset = CLOUDFLARED_ASSETS[`${process.platform}-${process.arch}`];
+    if (!asset) throw new Error("ติดตั้งอัตโนมัติยังไม่รองรับเครื่องนี้ — ติดตั้ง cloudflared เองตามคู่มือของ Cloudflare แล้วกดตรวจอีกครั้ง");
+    const dir = binDir(root);
+    fs.mkdirSync(dir, { recursive: true });
+    const target = path.join(dir, `cloudflared${EXE}`);
+    const temp = `${target}.download`;
+    progress(2, "กำลังดาวน์โหลด cloudflared จาก GitHub ของ Cloudflare");
+    await download(`https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}`, temp, {
+      maxBytes: 200 * 1024 * 1024,
+      signal,
+      onProgress: ({ received, ratio }) => progress(2 + (ratio ?? 0) * 90, `กำลังดาวน์โหลด cloudflared · ${(received / 1e6).toFixed(0)} MB`),
+    });
+    if (process.platform !== "win32") fs.chmodSync(temp, 0o755);
+    progress(94, "กำลังตรวจไฟล์");
+    const res = await runCli(temp, ["--version"], { timeoutMs: 15_000, signal });
+    if (res.code !== 0) {
+      fs.rmSync(temp, { force: true });
+      throw new Error("ไฟล์ cloudflared ที่โหลดมาเปิดไม่ได้");
+    }
+    fs.renameSync(temp, target);
+    progress(100, "ติดตั้ง cloudflared เรียบร้อย");
   });
 }
 
