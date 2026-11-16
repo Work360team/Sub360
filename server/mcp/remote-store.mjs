@@ -5,6 +5,7 @@
 // Ids come from the internet, so every lookup checks own properties only (no "__proto__" tricks).
 import fs from "node:fs";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 
 const EMPTY = () => ({ settings: { enabled: false, mode: "quick", hostname: "" }, clients: {}, grants: {}, tokens: {} });
 const TOUCH_SAVE_MS = 60_000;
@@ -17,6 +18,7 @@ export function createRemoteStore(file) {
   try {
     const loaded = JSON.parse(fs.readFileSync(file, "utf8"));
     data = {
+      linkKey: typeof loaded.linkKey === "string" ? loaded.linkKey : null,
       settings: { ...EMPTY().settings, ...loaded.settings },
       clients: Object.assign(Object.create(null), loaded.clients),
       grants: Object.assign(Object.create(null), loaded.grants),
@@ -57,6 +59,18 @@ export function createRemoteStore(file) {
   }
 
   return {
+    /** Signing key for online file links; made once, replaced by resetLinkKey (every link stops working). */
+    linkKey() {
+      if (!data.linkKey) {
+        data.linkKey = randomBytes(32).toString("base64url");
+        save();
+      }
+      return data.linkKey;
+    },
+    resetLinkKey() {
+      data.linkKey = randomBytes(32).toString("base64url");
+      save();
+    },
     settings: () => ({ ...data.settings }),
     setSettings(patch) {
       data.settings = { ...data.settings, ...patch };

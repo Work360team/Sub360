@@ -25,11 +25,13 @@ export function extractTunnelToken(raw) {
 }
 
 /**
- * createRemote({ home, mcp, findCloudflared, getToken, log })
+ * createRemote({ home, mcp, findCloudflared, getToken, files, onAttention, log })
  *   findCloudflared()  → { ready, path, version }
  *   getToken()         → named-tunnel token from .env (or "")
+ *   files.resolve(id, kind) → { path, name } of a rendered output (for online links)
+ *   onAttention()      an AI app is waiting for the pairing code: bring the window to the connect page
  */
-export function createRemote({ home, mcp, findCloudflared, getToken, log = console.error }) {
+export function createRemote({ home, mcp, findCloudflared, getToken, files = null, onAttention = () => {}, log = console.error }) {
   const store = createRemoteStore(path.join(home, "mcp-remote.json"));
   const tunnel = createTunnel({ log });
   const fixedPort = Number(process.env.SUB360_MCP_GATEWAY_PORT || DEFAULT_GATEWAY_PORT);
@@ -46,8 +48,15 @@ export function createRemote({ home, mcp, findCloudflared, getToken, log = conso
     return tunnel.status().url;
   }
 
-  // การเชื่อมใหม่เริ่มจากหน้าต่าง Sub360 เท่านั้น (gateway.startPairing) — คำขอจากเน็ตไม่ดึงหน้าต่างขึ้นมาเอง
-  const gateway = createGateway({ store, mcp, publicUrl, log });
+  // แอป AI เปิดหน้าขอเชื่อมต่อ → หน้าต่างขึ้นมาพร้อมรหัส (ไม่เกินทุก 5 วินาที คนรู้ที่อยู่ยิงรัว ๆ ก็ไม่เด้งไม่หยุด)
+  let lastAttention = 0;
+  const onPairing = () => {
+    if (Date.now() - lastAttention < 5000) return;
+    lastAttention = Date.now();
+    onAttention();
+  };
+  const gateway = createGateway({ store, mcp, publicUrl, onPairing, files, log });
+  const tunnelReady = () => Boolean(listener && (process.env.SUB360_MCP_PUBLIC_URL || tunnel.status().state === "connected"));
 
   function listen(at) {
     return new Promise((resolve, reject) => {
@@ -153,6 +162,16 @@ export function createRemote({ home, mcp, findCloudflared, getToken, log = conso
     /** คนกด "เชื่อมแอป AI ใหม่" ในหน้าต่าง — เปิดรับรหัส 6 หลักครั้งเดียว 10 นาที */
     startPairing: () => (store.settings().enabled && listener ? gateway.startPairing() : null),
     cancelPairing: () => gateway.cancelPairing(),
+    pairingStatus: () => (store.settings().enabled ? gateway.pairingStatus() : { open: null, lastConnected: null, autoLockedUntil: null }),
+    /**
+     * ลิงก์ออนไลน์ของไฟล์ที่เรนเดอร์แล้ว { mp4: url, srt: url, … } — มีเฉพาะตอนเปิดแอปบนคลาวด์และ tunnel พร้อม
+     * ลิงก์ใช้ได้ 3 วัน และเฉพาะตอน Sub360 กับ tunnel เปิดอยู่
+     */
+    fileLinks(projectId, kinds) {
+      if (!store.settings().enabled || !tunnelReady()) return null;
+      return Object.fromEntries(kinds.map((kind) => [kind, gateway.fileLink(projectId, kind)]));
+    },
+    resetFileLinks: () => store.resetLinkKey(),
     revoke: (id) => store.revokeGrant(id),
     revokeAll: () => store.revokeAll(),
     async stop() {

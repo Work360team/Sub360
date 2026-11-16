@@ -35,6 +35,7 @@ const COVERAGE = {
   'rest[0] === "restart" && method === "POST"': { people: "tunnel control stays with the person" },
   'rest[0] === "pairing" && method === "POST"': { people: "a new AI app connection starts only from the person in the Sub360 window" },
   'rest[0] === "pairing" && method === "DELETE"': { people: "pairing is controlled by the person" },
+  'rest[0] === "links" && method === "DELETE"': { people: "revoking every online file link is the person's decision" },
   'rest[0] === "connections" && method === "DELETE"': { people: "cancelling connections is done by the person" },
 };
 

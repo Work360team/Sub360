@@ -989,3 +989,4 @@ body.setup-mode .content-frame { width: 100%; margin-left: 0; }
   .code-box pre { padding-right: 16px; padding-top: 48px; }
   .pair-code { font-size: 28px; }
 }
+.link-button { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
