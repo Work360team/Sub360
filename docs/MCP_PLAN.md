@@ -109,7 +109,7 @@ Sub360 ไม่มีข้อมูลลูกค้า แต่ข้อค
 | M2 | gateway OAuth + Cloudflare Tunnel (quick/named) + อนุมัติในแอป | เทสต์ OAuth ครบวงจร + quick tunnel จริงตอบ metadata | ทำในเครื่องแล้ว · quick ผ่าน, named ยังไม่ทดสอบ |
 | M3 | หน้า "เชื่อมต่อ AI" + คู่มือ `docs/AI_CONNECT.md` + coverage test | coverage ผ่าน | ทำในเครื่องแล้ว |
 | M4 | ทดสอบกับ ChatGPT / Gemini / claude.ai ตัวจริงผ่าน tunnel | ผู้ใช้เชื่อมเองและสั่งงานได้ 1 ชิ้น | รอผู้ใช้ |
-| M5 | ออกเวอร์ชัน Windows ที่มี MCP (electron-builder) และทดสอบ Sub360.exe เป็น stdio server | Claude Desktop เรียกได้จากตัวติดตั้งจริง | v0.5.0 · ออกโดย CI เมื่อ PR #13 merge เข้า main · ยังไม่ได้ทดสอบกับ Claude Desktop จากตัวติดตั้งจริง |
+| M5 | ออกเวอร์ชัน Windows ที่มี MCP (electron-builder) และทดสอบ Sub360.exe เป็น stdio server | Claude Desktop เรียกได้จากตัวติดตั้งจริง | ออกแล้ว v0.5.0 (16 พ.ย. 2569, [Release](https://github.com/Work360team/Sub360/releases/tag/v0.5.0) จาก `80cae90`) · CI ผ่านทุกขั้นรวม smoke test ของแอปที่แพ็กแล้ว · ทดสอบ Sub360.exe เป็น stdio server กับ Claude Code แล้ว (ก่อนออกเวอร์ชัน) · ยังไม่ได้ทดสอบ: Claude Desktop จากตัวติดตั้งจริง และการอัปเดตจาก v0.4.8 บนเครื่องผู้ใช้ |
 
 ## 11. ทดสอบกับแอปจริง
 
