@@ -61,7 +61,7 @@
 
 ## สั่งงานจากแอป AI (MCP)
 
-สั่งงาน Sub360 จาก Claude Desktop, Claude Code, Codex, Gemini CLI (ในเครื่อง) หรือ ChatGPT, Gemini, claude.ai (ผ่าน Cloudflare Tunnel ที่ต้องอนุมัติในแอปก่อน) — ตั้งที่เมนู **เชื่อมต่อ AI** · คู่มือ: [docs/AI_CONNECT.md](docs/AI_CONNECT.md) · การออกแบบ: [docs/MCP_PLAN.md](docs/MCP_PLAN.md)
+สั่งงาน Sub360 จาก Claude Desktop, Claude Code, Codex, Gemini CLI (ในเครื่อง) หรือ ChatGPT, Gemini, claude.ai (ผ่านปุ่ม Cloudflare หรือ tunnel ของคุณเอง และต้องพิมพ์รหัสจากหน้าต่าง Sub360 ก่อน) — ปิดไว้เป็นค่าเริ่มต้น เปิดที่ **ตั้งค่า → เชื่อมแอป AI** · คู่มือ: [docs/AI_CONNECT.md](docs/AI_CONNECT.md) · การออกแบบ: [docs/MCP_PLAN.md](docs/MCP_PLAN.md)
 
 ## สำหรับทีมพัฒนา
 

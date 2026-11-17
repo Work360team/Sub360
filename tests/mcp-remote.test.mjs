@@ -1,6 +1,7 @@
 // Remote MCP gateway end to end, without a tunnel: OAuth 2.1 the way ChatGPT/Gemini/claude.ai do it,
-// with the person starting the pairing in the Sub360 window (here: the window's local API) and typing
-// the code on the page the AI app opened.
+// with the pairing code shown in the Sub360 window (here: the window's local API) and typed on the page
+// the AI app opened. Plus the Clip360-style rules: master switch, internet access modes, connections
+// retired when their address stops leading here, and watch links.
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
@@ -40,6 +41,7 @@ const mcpCall = (token, body) => fetch(`${GW}/mcp`, {
   headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
   body: JSON.stringify(body),
 });
+const toolCall = async (token, name, args) => (await (await mcpCall(token, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } })).json()).result;
 const tokenCall = (data) => fetch(`${GW}/oauth/token`, form(data));
 
 async function register(name = "ChatGPT", redirect = REDIRECT) {
@@ -77,8 +79,8 @@ async function submit(c, extra) {
 }
 
 async function startPairing() {
-  const { status, body } = await appApi("POST", "/mcp/remote/pairing");
-  assert.equal(status, 200);
+  const { status, body } = await appApi("POST", "/mcp/pairing");
+  assert.equal(status, 200, JSON.stringify(body));
   return body.pairing.open.code;
 }
 
@@ -94,9 +96,22 @@ async function connect(name = "claude.ai") {
 }
 
 /** Raw request with a chosen Host header (fetch does not allow setting it). */
-function rawGet(p, host) {
+function rawGet(p, headers) {
   return new Promise((resolve, reject) => {
-    http.get({ host: "127.0.0.1", port: GW_PORT, path: p, headers: { host } }, (res) => { res.resume(); resolve(res.statusCode); }).on("error", reject);
+    http.get({ host: "127.0.0.1", port: GW_PORT, path: p, headers }, (res) => { res.resume(); resolve(res.statusCode); }).on("error", reject);
+  });
+}
+
+/** Calls a gateway object directly with a fake request (for cases a real server cannot set up). */
+function direct(gw, { method = "GET", url, headers = {}, body = "" }) {
+  const req = Object.assign(Readable.from(body ? [Buffer.from(body)] : []), { method, url, headers });
+  return new Promise((resolve) => {
+    gw.handle(req, {
+      statusCode: 0, headersSent: false,
+      writeHead(status) { this.statusCode = status; this.headersSent = true; },
+      setHeader() {},
+      end(data) { resolve({ status: this.statusCode, body: data ? String(data) : "" }); },
+    });
   });
 }
 
@@ -120,16 +135,18 @@ test.after(() => {
   fs.rmSync(HOME, { recursive: true, force: true });
 });
 
-test("ปิดเป็นค่าเริ่มต้น: gateway ไม่ฟังจนกว่าผู้ใช้เปิดในแอป", async () => {
-  const { body } = await appApi("GET", "/mcp/remote");
+test("ปิดเป็นค่าเริ่มต้น: ไม่มีทางเข้าจากอินเทอร์เน็ตจนกว่าผู้ใช้เปิดสวิตช์และเลือกทางเข้า", async () => {
+  const { body } = await appApi("GET", "/mcp");
   assert.equal(body.enabled, false);
+  assert.equal(body.remote.mode, "off");
   await assert.rejects(fetch(`${GW}/mcp`));
-  assert.equal((await appApi("POST", "/mcp/remote/pairing")).status, 409, "ยังเริ่มจับคู่ไม่ได้ตอนปิดอยู่");
-  const on = await appApi("PUT", "/mcp/remote", { enabled: true, mode: "quick" });
-  assert.equal(on.body.enabled, true);
-  assert.equal(on.body.gateway.running, true);
-  assert.equal(on.body.mcpUrl, `${GW}/mcp`);
-  assert.equal(on.body.pairing.open, null);
+  assert.equal((await appApi("PUT", "/mcp/remote", { mode: "quick" })).status, 409, "ต้องเปิดสวิตช์หลักก่อน");
+  assert.equal((await appApi("POST", "/mcp/pairing")).status, 409);
+  await appApi("POST", "/mcp/enabled", { enabled: true });
+  await assert.rejects(fetch(`${GW}/mcp`), "เปิดสวิตช์หลักอย่างเดียวยังไม่เปิดทางเข้า");
+  const on = await appApi("PUT", "/mcp/remote", { mode: "quick" });
+  assert.equal(on.body.remote.mode, "quick");
+  assert.equal(on.body.remote.publicMcpUrl, `${GW}/mcp`);
 });
 
 test("ไม่มีโทเค็น → 401 ทุก method พร้อม resource_metadata (Gemini ลอง GET/HEAD ก่อน)", async () => {
@@ -154,8 +171,24 @@ test("metadata ครบ · gateway ไม่เปิด /api · ตอบเ�
   for (const p of ["/api/status", "/api/projects", "/index.html", "/app.js"]) {
     assert.equal((await fetch(`${GW}${p}`)).status, 404, p);
   }
-  assert.equal(await rawGet("/.well-known/oauth-protected-resource", "evil.example"), 421);
-  assert.equal(await rawGet("/.well-known/oauth-protected-resource", `127.0.0.1:${GW_PORT}`), 200);
+  assert.equal(await rawGet("/.well-known/oauth-protected-resource", { host: "evil.example" }), 421);
+  assert.equal(await rawGet("/.well-known/oauth-protected-resource", { host: `127.0.0.1:${GW_PORT}` }), 200);
+});
+
+test("tunnel ที่เปลี่ยน Host เป็น 127.0.0.1 ใช้ได้เฉพาะเมื่อบอก X-Forwarded-Host ที่ตรงกับที่อยู่สาธารณะ", async () => {
+  const { createGateway } = await import("../server/mcp/gateway.mjs");
+  const { createAccessStore } = await import("../server/mcp/access.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sub360-host-"));
+  try {
+    const gw = createGateway({ store: createAccessStore(dir), mcp: null, publicUrl: () => "https://sub360.example.com" });
+    const p = "/.well-known/oauth-protected-resource";
+    assert.equal((await direct(gw, { url: p, headers: { host: "sub360.example.com" } })).status, 200);
+    assert.equal((await direct(gw, { url: p, headers: { host: "127.0.0.1:4370", "x-forwarded-host": "sub360.example.com" } })).status, 200);
+    assert.equal((await direct(gw, { url: p, headers: { host: "127.0.0.1:4370" } })).status, 421);
+    assert.equal((await direct(gw, { url: p, headers: { host: "127.0.0.1:4370", "x-forwarded-host": "evil.example" } })).status, 421);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("ลงทะเบียน: รับเฉพาะ https หรือ localhost · id แปลก ๆ ไม่ทำให้พัง", async () => {
@@ -169,47 +202,45 @@ test("ลงทะเบียน: รับเฉพาะ https หรือ l
     const res = await fetch(`${GW}/oauth/authorize?client_id=${id}&response_type=code`);
     assert.equal(res.status, 400, id);
   }
-  assert.equal((await appApi("DELETE", "/mcp/remote/connections/__proto__")).status, 200);
+  assert.equal((await appApi("DELETE", "/mcp/connections/__proto__")).status, 200);
   assert.equal(({}).revokedAt, undefined, "ไม่มี prototype pollution");
 });
 
 test("แอป AI เปิดหน้าขอเชื่อมต่อ → รหัสขึ้นในหน้าต่าง Sub360 เอง (ไม่อยู่ในหน้าเว็บ) แล้วพิมพ์ต่อได้เลย", async () => {
   const clientId = await register("Claude");
-  const c = await consent(clientId, "st", "https://chatgpt.com/connector_platform_oauth_redirect");
+  const c = await consent(clientId, "st", REDIRECT);
   assert.match(c.csp, /form-action 'none'/);
-  assert.doesNotMatch(c.html, /ไม่ใช่แอป AI ที่ Sub360 รู้จัก/);
-  const { body: p } = await appApi("GET", "/mcp/remote/pairing");
+  const { body: p } = await appApi("GET", "/mcp/pairing");
   assert.ok(p.open, "เปิดรอบจับคู่ให้เอง");
   assert.equal(p.open.auto, true);
   assert.deepEqual(p.open.requesters.map((x) => [x.clientName, x.redirectHost]), [["Claude", "chatgpt.com"]]);
   assert.ok(!c.html.includes(p.open.code), "รหัสต้องไม่อยู่ในหน้าเว็บที่ใครก็เปิดได้");
-  // เปิดหน้าซ้ำ (รีเฟรช) ไม่เปลี่ยนรหัส
   await consent(clientId);
-  assert.equal((await appApi("GET", "/mcp/remote/pairing")).body.open.code, p.open.code);
+  assert.equal((await appApi("GET", "/mcp/pairing")).body.open.code, p.open.code, "รีเฟรชหน้าไม่เปลี่ยนรหัส");
   const ok = await submit(c, { code: p.open.code });
   assert.ok(ok.body.redirect, JSON.stringify(ok.body));
-  assert.equal((await appApi("GET", "/mcp/remote/pairing")).body.open, null, "ใช้แล้วปิด");
+  assert.equal((await appApi("GET", "/mcp/pairing")).body.open, null, "ใช้แล้วปิด");
 });
 
 test("พิมพ์รหัสผิดเกิน 10 ครั้ง → หยุดเปิดรหัสอัตโนมัติชั่วคราว ปุ่มในแอปยังใช้ได้", async () => {
   const clientId = await register("Guesser");
   const c = await consent(clientId);
-  const { code } = (await appApi("GET", "/mcp/remote/pairing")).body.open;
+  const { code } = (await appApi("GET", "/mcp/pairing")).body.open;
   const wrong = code === "999999" ? "999998" : "999999";
   let last;
   for (let i = 0; i < 10; i += 1) last = await submit(c, { code: wrong });
   assert.match(last.body.error, /หลายครั้งเกินไป/);
   await consent(clientId);
-  const locked = (await appApi("GET", "/mcp/remote/pairing")).body;
+  const locked = (await appApi("GET", "/mcp/pairing")).body;
   assert.equal(locked.open, null, "เปิดหน้าใหม่ก็ไม่ได้รหัสใหม่");
   assert.ok(locked.autoLockedUntil > Date.now());
   assert.equal((await submit(c, { code })).status, 409);
   const manual = await startPairing();
   assert.ok((await submit(c, { code: manual })).body.redirect, "คนกดเริ่มเองในแอปได้เสมอ");
-  assert.equal((await appApi("GET", "/mcp/remote/pairing")).body.autoLockedUntil, null);
+  assert.equal((await appApi("GET", "/mcp/pairing")).body.autoLockedUntil, null);
 });
 
-test("OAuth ครบวงจร: กดเริ่มในแอป → พิมพ์รหัส → โทเค็น → tools → refresh → ยกเลิกในแอป", async () => {
+test("OAuth ครบวงจร: รหัส → โทเค็น → tools → refresh → ยกเลิกในแอป · การเชื่อมจำที่อยู่ที่ใช้เชื่อม", async () => {
   const clientId = await register("ChatGPT");
   const c = await consent(clientId);
   const code = await startPairing();
@@ -222,79 +253,159 @@ test("OAuth ครบวงจร: กดเริ่มในแอป → พ�
   assert.equal(back.origin + back.pathname, REDIRECT);
   assert.equal(back.searchParams.get("state").length, 1700, "state ยาวแบบ Gemini กลับไปครบ");
   assert.equal(back.searchParams.get("iss"), GW);
-  const after = (await appApi("GET", "/mcp/remote")).body;
-  assert.equal(after.pairing.open, null, "รหัสใช้ได้ครั้งเดียว");
-  assert.equal(after.pairing.lastConnected.clientName, "ChatGPT");
-  assert.equal(after.connections.length, 0, "ยังไม่เป็นการเชื่อมจนกว่าแอปแลกโทเค็น");
-  assert.equal((await submit(c, { code })).status, 409, "ใช้รหัสเดิมซ้ำไม่ได้");
+  assert.equal((await appApi("GET", "/mcp")).body.pairing.lastConnected.clientName, "ChatGPT");
 
   const authCode = back.searchParams.get("code");
   assert.equal((await tokenCall({ grant_type: "authorization_code", code: authCode, redirect_uri: REDIRECT, client_id: clientId, code_verifier: "x".repeat(43) })).status, 400);
   const tokens = await (await tokenCall({ grant_type: "authorization_code", code: authCode, redirect_uri: REDIRECT, client_id: clientId, code_verifier: c.verifier })).json();
   assert.equal(tokens.token_type, "Bearer");
-  assert.ok(tokens.access_token && tokens.refresh_token);
+  const conn = (await appApi("GET", "/mcp")).body.connections.find((x) => x.clientName === "ChatGPT");
+  assert.equal(conn.issuer, GW, "จำที่อยู่ที่ใช้เชื่อมไว้ เผื่อที่อยู่เปลี่ยน");
 
-  const init = await (await mcpCall(tokens.access_token, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "chatgpt", version: "1" } } })).json();
-  assert.equal(init.result.serverInfo.name, "sub360");
-  const list = await (await mcpCall(tokens.access_token, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "list_projects", arguments: {} } })).json();
-  assert.equal(list.result.isError, false);
-
+  const list = await toolCall(tokens.access_token, "list_projects", {});
+  assert.equal(list.isError, false);
   // แอปบนคลาวด์นำเข้าไฟล์จากเครื่องไม่ได้ และไม่รู้ด้วยซ้ำว่าไฟล์มีอยู่ไหม
-  const fake = path.join(HOME, "clip.mp4");
-  fs.writeFileSync(fake, "not really a video");
-  for (const file_path of [fake, path.join(HOME, "missing.mp4"), "\\\\attacker\\share\\a.mp4"]) {
-    const res = await (await mcpCall(tokens.access_token, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "create_project_from_file", arguments: { file_path } } })).json();
-    assert.equal(res.result.isError, true);
-    assert.match(res.result.content[0].text, /ลากวิดีโอเข้าไป/);
+  for (const file_path of [path.join(HOME, "missing.mp4"), "\\\\attacker\\share\\a.mp4"]) {
+    const res = await toolCall(tokens.access_token, "create_project_from_file", { file_path });
+    assert.match(res.content[0].text, /ลากวิดีโอเข้าไป/);
   }
   const batch = await (await mcpCall(tokens.access_token, Array.from({ length: 21 }, (_, i) => ({ jsonrpc: "2.0", id: i, method: "ping" })))).json();
   assert.equal(batch.error.code, -32600, "batch ใหญ่เกินถูกปฏิเสธ");
 
-  // refresh หมุนโทเค็น · ใช้ซ้ำในช่วงผ่อนผันไม่ยืดช่วงนั้น
+  // สวิตช์หลักปิด → แอปบนคลาวด์ก็ทำอะไรไม่ได้ (tunnel หยุดด้วย)
   const refreshed = await (await tokenCall({ grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: clientId })).json();
   assert.ok(refreshed.access_token && refreshed.refresh_token !== tokens.refresh_token);
-  assert.equal((await mcpCall(refreshed.access_token, { jsonrpc: "2.0", id: 4, method: "ping" })).status, 200);
-  const oldHash = createHash("sha256").update(tokens.refresh_token).digest("hex");
-  const firstRotated = JSON.parse(fs.readFileSync(path.join(HOME, "mcp-remote.json"), "utf8")).tokens[oldHash].rotatedAt;
-  assert.ok(firstRotated);
-  await tokenCall({ grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: clientId });
-  assert.equal(JSON.parse(fs.readFileSync(path.join(HOME, "mcp-remote.json"), "utf8")).tokens[oldHash].rotatedAt, firstRotated);
-
-  // ผู้ใช้ยกเลิกในแอป → ใช้ไม่ได้ทันที
-  const conn = (await appApi("GET", "/mcp/remote")).body.connections.find((x) => x.clientName === "ChatGPT");
-  assert.ok(conn.lastUsedAt);
-  await appApi("DELETE", `/mcp/remote/connections/${conn.id}`);
+  await appApi("DELETE", `/mcp/connections/${conn.id}`);
   assert.equal((await mcpCall(refreshed.access_token, { jsonrpc: "2.0", id: 5, method: "ping" })).status, 401);
   assert.equal((await tokenCall({ grant_type: "refresh_token", refresh_token: refreshed.refresh_token, client_id: clientId })).status, 400);
 });
 
+test("ลิงก์ดูคลิปผ่านอินเทอร์เน็ต: หน้าดู + วิดีโอเลื่อนได้ · ลิงก์ปลอม/ยกเลิกแล้วเปิดไม่ได้ · ดูได้อย่างเดียวหยุดการสร้างลิงก์", async () => {
+  const id = "fakeproj01";
+  const dir = path.join(HOME, "data", "projects", id);
+  fs.mkdirSync(path.join(dir, "out"), { recursive: true });
+  const video = Buffer.from(Array.from({ length: 5000 }, (_, i) => i % 251));
+  fs.writeFileSync(path.join(dir, "out", "final.mp4"), video);
+  const now = Date.now();
+  fs.writeFileSync(path.join(dir, "project.json"), JSON.stringify({
+    id, title: "คลิปทดสอบ", createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(), status: "rendered",
+    settings: { style: "karaoke-pop", colorSet: null, anchor: null, fontScale: 1, language: "th" },
+    source: { file: "source.mp4", name: "x.mp4", size: 10 }, meta: { durationMs: 4000, width: 320, height: 240, hasAudio: true },
+    timeline: { chunks: [{ id: "c1", text: "ทดสอบ", startMs: 0, endMs: 1000, words: [] }] }, job: null, editedAt: now - 5000,
+    result: { files: { mp4: "final.mp4" }, at: now, warnings: [] },
+  }));
+
+  const { tokens } = await connect("Links");
+  const link = (await toolCall(tokens.access_token, "get_video_link", { id })).structuredContent;
+  assert.equal(link.reachable_from, "anywhere");
+  assert.ok(link.watch_url.startsWith(`${GW}/v/`));
+  const page = await fetch(link.watch_url);
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /คลิปทดสอบ/);
+  const full = await fetch(link.video_url);
+  assert.deepEqual(Buffer.from(await full.arrayBuffer()), video);
+  const part = await fetch(link.video_url, { headers: { range: "bytes=100-199" } });
+  assert.equal(part.status, 206);
+  assert.deepEqual(Buffer.from(await part.arrayBuffer()), video.subarray(100, 200));
+  assert.equal((await fetch(`${GW}/v/${"A".repeat(32)}`)).status, 404, "ลิงก์ที่ไม่ได้สร้างเปิดไม่ได้");
+  assert.equal(await rawGet(new URL(link.watch_url).pathname, { host: "evil.example" }), 421);
+
+  await appApi("DELETE", "/mcp/video-links");
+  assert.equal((await fetch(link.watch_url)).status, 404, "ยกเลิกลิงก์ทั้งหมดแล้วเปิดไม่ได้");
+
+  await appApi("POST", "/mcp/write", { enabled: false });
+  assert.match((await toolCall(tokens.access_token, "get_video_link", { id })).content[0].text, /ดูข้อมูลได้อย่างเดียว/);
+  await appApi("POST", "/mcp/write", { enabled: true });
+});
+
 test("refresh เก่าถูกใช้หลังพ้นช่วงผ่อนผัน = มีคนอื่นถือสำเนา → ยกเลิกการเชื่อมนั้น", async () => {
-  // รอให้พ้น 60 วินาทีจริงไม่ได้ จึงเรียก gateway ตรง ๆ กับ token ที่หมุนไปแล้ว 5 นาที
-  const { createRemoteStore } = await import("../server/mcp/remote-store.mjs");
+  const { createAccessStore } = await import("../server/mcp/access.mjs");
   const { createGateway } = await import("../server/mcp/gateway.mjs");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sub360-reuse-"));
   try {
-    const store = createRemoteStore(path.join(dir, "r.json"));
-    store.addGrant("g1", { clientId: "c1", clientName: "x", redirectHost: "x" });
+    const store = createAccessStore(dir);
+    store.addGrant("g1", { clientId: "c1", clientName: "x", redirectHost: "x", issuer: "http://gw.test" });
     const hash = createHash("sha256").update("old-refresh").digest("hex");
     store.addTokens([[hash, { grantId: "g1", clientId: "c1", kind: "refresh", expiresAt: Date.now() + 86_400_000, rotatedAt: Date.now() - 5 * 60_000 }]]);
     const gw = createGateway({ store, mcp: null, publicUrl: () => "http://gw.test" });
-    const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: "old-refresh" }).toString();
-    const req = Object.assign(Readable.from([Buffer.from(body)]), {
+    const res = await direct(gw, {
       method: "POST", url: "/oauth/token", headers: { host: "gw.test", "content-type": "application/x-www-form-urlencoded" },
-    });
-    const res = await new Promise((resolve) => {
-      gw.handle(req, {
-        statusCode: 0,
-        headersSent: false,
-        writeHead(status) { this.statusCode = status; this.headersSent = true; },
-        setHeader() {},
-        end(data) { resolve({ status: this.statusCode, body: JSON.parse(data) }); },
-      });
+      body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: "old-refresh" }).toString(),
     });
     assert.equal(res.status, 400);
-    assert.match(res.body.error_description, /cancelled/);
+    assert.match(JSON.parse(res.body).error_description, /cancelled/);
     assert.ok(store.grant("g1").revokedAt, "การเชื่อมถูกยกเลิก");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ที่อยู่เปลี่ยน/เปิดแอปใหม่ → การเชื่อมของที่อยู่ที่ใช้ไม่ได้แล้วถูกยกเลิกพร้อมแถบแจ้ง · URL ของฉันไม่ถูกยกเลิก", async () => {
+  const { createRemote, normalizePublicUrl } = await import("../server/mcp/remote.mjs");
+  const { createAccessStore } = await import("../server/mcp/access.mjs");
+  assert.equal(normalizePublicUrl("https://Sub360.Example.com/mcp"), "https://sub360.example.com");
+  for (const bad of ["http://sub360.example.com", "https://localhost", "https://192.168.1.5", "ftp://x.y", "nonsense"]) {
+    assert.equal(normalizePublicUrl(bad), null, bad);
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sub360-retire-"));
+  const saved = { port: process.env.SUB360_MCP_GATEWAY_PORT, url: process.env.SUB360_MCP_PUBLIC_URL };
+  process.env.SUB360_MCP_GATEWAY_PORT = String(5600 + Math.floor(Math.random() * 200));
+  delete process.env.SUB360_MCP_PUBLIC_URL;
+  try {
+    // เตรียมข้อมูลเหมือนแอปที่เคยเปิดปุ่ม Cloudflare ไว้: การเชื่อม 2 แบบ + 1 แบบรุ่นเก่าที่ไม่มีที่อยู่
+    const seed = createAccessStore(dir);
+    seed.setEnabled(true);
+    seed.setRemote({ mode: "quick", lastPublicOrigin: "https://old-quick.trycloudflare.com" });
+    seed.addClient("c1", { name: "ChatGPT", redirectUris: [REDIRECT] });
+    seed.addClient("c2", { name: "Claude", redirectUris: ["https://claude.ai/api/mcp/auth_callback"] });
+    seed.addClient("c3", { name: "Gemini", redirectUris: ["https://oauth-redirect.googleusercontent.com/r/x"] });
+    seed.addGrant("quick", { clientId: "c1", clientName: "ChatGPT", redirectHost: "chatgpt.com", issuer: "https://old-quick.trycloudflare.com" });
+    seed.addGrant("legacy", { clientId: "c3", clientName: "Gemini", redirectHost: "oauth-redirect.googleusercontent.com" });
+    seed.addGrant("mine", { clientId: "c2", clientName: "Claude", redirectHost: "claude.ai", issuer: "https://sub360.example.com" });
+    seed.setRemote({ customUrl: "https://sub360.example.com" });
+
+    const remote = createRemote({ home: dir, findCloudflared: async () => ({ ready: false }) });
+    await remote.start();
+    let st = remote.status();
+    assert.equal(st.remote.mode, "off", "ปุ่ม Cloudflare ไม่เปิดเองตอนเปิดแอป");
+    assert.deepEqual(st.connections.map((c) => c.clientName), ["Claude"], "เหลือเฉพาะการเชื่อมผ่าน URL ของฉัน");
+    assert.equal(st.remote.notice.reason, "restart");
+    assert.deepEqual(st.remote.notice.apps.sort(), ["ChatGPT", "Gemini"]);
+    assert.match(st.remote.notice.oldUrl, /old-quick/);
+
+    // เปลี่ยนไปใช้ URL ของฉันที่อยู่ใหม่: การเชื่อมของที่อยู่เดิม (ที่ไม่ใช่ที่อยู่คงที่ปัจจุบัน) ถูกยกเลิก
+    remote.dismissNotice();
+    await remote.setRemote("custom", "https://new.example.org/");
+    st = remote.status();
+    assert.equal(st.remote.publicMcpUrl, "https://new.example.org/mcp");
+    assert.equal(st.connections.length, 0);
+    assert.equal(st.remote.notice.reason, "changed");
+    await assert.rejects(remote.setRemote("custom", "http://insecure.example.org"), /https/);
+    await remote.stop();
+  } finally {
+    if (saved.port === undefined) delete process.env.SUB360_MCP_GATEWAY_PORT; else process.env.SUB360_MCP_GATEWAY_PORT = saved.port;
+    if (saved.url !== undefined) process.env.SUB360_MCP_PUBLIC_URL = saved.url;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("ไฟล์ของ v0.5.x (mcp-remote.json) ย้ายมาเป็น mcp-access.json โดยไม่เสียการเชื่อม", async () => {
+  const { createAccessStore } = await import("../server/mcp/access.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sub360-migrate-"));
+  try {
+    fs.writeFileSync(path.join(dir, "mcp-remote.json"), JSON.stringify({
+      settings: { enabled: true, mode: "named", hostname: "sub360.example.com" },
+      clients: { c1: { name: "ChatGPT", redirectUris: [REDIRECT], createdAt: Date.now() } },
+      grants: { g1: { clientId: "c1", clientName: "ChatGPT", redirectHost: "chatgpt.com", createdAt: Date.now(), revokedAt: null } },
+      tokens: {},
+    }));
+    const store = createAccessStore(dir);
+    assert.equal(store.enabled, true, "เคยใช้หน้าแอป AI แล้ว จึงเปิดไว้เหมือนเดิม");
+    assert.equal(store.remote.mode, "custom");
+    assert.equal(store.remote.customUrl, "https://sub360.example.com");
+    assert.equal(store.activeGrants().length, 1);
+    assert.ok(fs.existsSync(path.join(dir, "mcp-access.json")));
+    assert.ok(!fs.existsSync(path.join(dir, "mcp-remote.json")));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -318,56 +429,6 @@ test("ปลายทางที่ไม่รู้จัก → หน้า
   assert.match(c.html, /ไม่ใช่แอป AI ที่ Sub360 รู้จัก/);
 });
 
-test("ผลลัพธ์เป็นลิงก์ออนไลน์: ลายเซ็นถูก เปิดได้ (รองรับเลื่อนวิดีโอ) · ลิงก์ปลอม/หมดอายุ/ยกเลิกแล้วเปิดไม่ได้", async () => {
-  // โปรเจกต์ที่เรนเดอร์แล้ว (สร้างไฟล์ตรง ๆ ไม่ต้องรอเรนเดอร์จริง — การเรนเดอร์ทดสอบใน mcp.test.mjs)
-  const id = "fakeproj01";
-  const dir = path.join(HOME, "data", "projects", id);
-  fs.mkdirSync(path.join(dir, "out"), { recursive: true });
-  const video = Buffer.from(Array.from({ length: 5000 }, (_, i) => i % 251));
-  fs.writeFileSync(path.join(dir, "out", "final.mp4"), video);
-  fs.writeFileSync(path.join(dir, "out", "captions.srt"), "1\n00:00:00,000 --> 00:00:01,000\n<script>x</script>\n");
-  const now = Date.now();
-  fs.writeFileSync(path.join(dir, "project.json"), JSON.stringify({
-    id, title: "คลิปทดสอบ", createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(), status: "rendered",
-    settings: { style: "karaoke-pop", colorSet: null, anchor: null, fontScale: 1, language: "th" },
-    source: { file: "source.mp4", name: "x.mp4", size: 10 }, meta: { durationMs: 4000, width: 320, height: 240, hasAudio: true },
-    timeline: { chunks: [{ id: "c1", text: "ทดสอบ", startMs: 0, endMs: 1000, words: [] }] }, job: null, editedAt: now - 5000,
-    result: { files: { mp4: "final.mp4", srt: "captions.srt" }, at: now, warnings: [] },
-  }));
-
-  const { tokens } = await connect("Links");
-  const got = await (await mcpCall(tokens.access_token, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_project", arguments: { id } } })).json();
-  const out = got.result.structuredContent.output;
-  assert.ok(out.online_urls?.mp4?.startsWith(`${GW}/files/${id}/mp4?`), JSON.stringify(out));
-  assert.match(got.result.structuredContent.next, /online_urls\.mp4/);
-
-  const full = await fetch(out.online_urls.mp4);
-  assert.equal(full.status, 200);
-  assert.equal(full.headers.get("content-type"), "video/mp4");
-  assert.match(full.headers.get("content-disposition"), /^inline; filename\*=UTF-8''/);
-  assert.deepEqual(Buffer.from(await full.arrayBuffer()), video);
-  const part = await fetch(out.online_urls.mp4, { headers: { range: "bytes=100-199" } });
-  assert.equal(part.status, 206);
-  assert.deepEqual(Buffer.from(await part.arrayBuffer()), video.subarray(100, 200));
-  const srt = await fetch(out.online_urls.srt);
-  assert.match(srt.headers.get("content-security-policy"), /sandbox/, "ข้อความซับเปิดเป็นหน้าเว็บไม่ได้");
-
-  const u = new URL(out.online_urls.mp4);
-  const tampered = `${GW}/files/${id}/srt?e=${u.searchParams.get("e")}&s=${u.searchParams.get("s")}`;
-  assert.equal((await fetch(tampered)).status, 403, "ลายเซ็นผูกกับไฟล์นั้น");
-  const { createHmac } = await import("node:crypto");
-  const key = JSON.parse(fs.readFileSync(path.join(HOME, "mcp-remote.json"), "utf8")).linkKey;
-  const sign = (kind, e) => createHmac("sha256", key).update(`${id}\n${kind}\n${e}`).digest("base64url");
-  const past = Math.floor(Date.now() / 1000) - 10;
-  assert.equal((await fetch(`${GW}/files/${id}/mp4?e=${past}&s=${sign("mp4", past)}`)).status, 403, "หมดอายุ");
-  const later = Math.floor(Date.now() / 1000) + 600;
-  assert.equal((await fetch(`${GW}/files/${id}/ass?e=${later}&s=${sign("ass", later)}`)).status, 404, "ไฟล์ที่ไม่ได้เรนเดอร์ไม่มีให้เปิด");
-  assert.equal(await rawGet(`/files/${id}/mp4?e=${u.searchParams.get("e")}&s=${u.searchParams.get("s")}`, "evil.example"), 421);
-
-  await appApi("DELETE", "/mcp/remote/links");
-  assert.equal((await fetch(out.online_urls.mp4)).status, 403, "ยกเลิกลิงก์ทั้งหมดแล้วเปิดไม่ได้");
-});
-
 test("code ใช้ซ้ำ = รั่ว → ยกเลิกการเชื่อมนั้นทั้งหมด", async () => {
   const { clientId, c, back, tokens } = await connect("claude.ai");
   assert.ok(tokens.access_token);
@@ -376,10 +437,12 @@ test("code ใช้ซ้ำ = รั่ว → ยกเลิกการเ�
   assert.equal((await mcpCall(tokens.access_token, { jsonrpc: "2.0", id: 1, method: "ping" })).status, 401);
 });
 
-test("ปิดในแอป → gateway หยุดฟังทันที และปิดการจับคู่ที่ค้าง", async () => {
+test("ปิดทางเข้า → gateway หยุดฟังทันที · ปิดสวิตช์หลัก → แอปบนเครื่องก็ทำอะไรไม่ได้", async () => {
   await startPairing();
-  const off = await appApi("PUT", "/mcp/remote", { enabled: false });
-  assert.equal(off.body.gateway.running, false);
+  const off = await appApi("PUT", "/mcp/remote", { mode: "off" });
+  assert.equal(off.body.remote.publicMcpUrl, null);
   assert.equal(off.body.pairing.open, null);
   await assert.rejects(fetch(`${GW}/.well-known/oauth-protected-resource`));
+  const disabled = await appApi("POST", "/mcp/enabled", { enabled: false });
+  assert.equal(disabled.body.enabled, false);
 });

@@ -606,8 +606,8 @@ async function route() {
     else if (head === "projects") await pageProjects();
     else if (head === "styles") await pageStyles();
     else if (head === "setup") await pageSetup();
-    else if (head === "settings") await pageSettings();
-    else if (head === "connect") await pageConnect();
+    else if (head === "settings") await pageSettings(id);
+    else if (head === "connect") { location.replace("#/settings/ai"); return; }
     else await pageHome();
   } catch (error) {
     view().innerHTML = `<div class="page"><div class="form-alert error">${icon("alert")}<div>${esc(error.message)}</div></div></div>`;
@@ -2256,78 +2256,175 @@ async function pageSetup() {
 }
 
 /* ---------- ตั้งค่า ---------- */
-async function pageSettings() {
-  setPage("settings", "ตั้งค่า");
-  const s = await refreshStatus();
+/* ---------- ตั้งค่า (แบ่งเป็นแท็บ — หลักเดียวกับ Clip360 v0.5.18) ---------- */
+// เดิมหน้าตั้งค่าเป็นการ์ดเรียงยาว และ "เชื่อมต่อ AI" แยกเป็นอีกหน้า ตอนนี้แต่ละเรื่องอยู่ในแท็บของตัวเอง
+// แท็บที่เปิดอยู่จำไว้ใน hash (#/settings/<แท็บ>) · ลิงก์เก่า #/connect พามาที่แท็บเชื่อมแอป AI
+const SETTINGS_TABS = [
+  { id: "tools", label: "เครื่องมือ", icon: "monitor" },
+  { id: "gemini", label: "AI แก้คำและแปล", icon: "wand" },
+  { id: "ai", label: "เชื่อมแอป AI", icon: "plug" },
+  { id: "system", label: "อัปเดตและไฟล์", icon: "folder" },
+];
+
+/** แถบสรุปบนสุด: เครื่องนี้พร้อมทำซับหรือยัง กดแต่ละเรื่องเพื่อไปแท็บที่แก้ได้ */
+function readinessHtml(s, mcp) {
+  const rows = [
+    { tab: "tools", label: "ถอดเสียง", ok: s.whisper, detail: s.whisper ? "พร้อม" : "ยังไม่ได้ติดตั้ง whisper" },
+    { tab: "tools", label: "เรนเดอร์", ok: s.ffmpeg, detail: s.ffmpeg ? "พร้อม" : "ยังไม่ได้ติดตั้ง FFmpeg" },
+    { tab: "gemini", label: "AI แก้คำ/แปล", ok: Boolean(s.gemini?.ready), optional: true, detail: s.gemini?.ready ? `${s.gemini.keys.length} คีย์` : "ไม่บังคับ" },
+    { tab: "ai", label: "แอป AI", ok: Boolean(mcp?.enabled), optional: true, detail: !mcp?.enabled ? "ปิดอยู่" : mcp.remote?.publicMcpUrl ? "เปิด · รับจากเน็ต" : "เปิดอยู่" },
+  ];
+  const blocked = rows.filter((r) => !r.ok && !r.optional);
+  return `<section class="ready-card ${blocked.length ? "warn" : "ok"}" aria-labelledby="ready-title">
+    <div class="ready-head"><span class="ready-icon">${icon(blocked.length ? "alert" : "check")}</span><h2 id="ready-title">${blocked.length ? `ยังขาดอีก ${blocked.length} อย่าง` : "พร้อมทำซับแล้ว"}</h2></div>
+    <ul class="ready-list">${rows.map((r) => `<li><button type="button" class="${r.ok ? "ok" : r.optional ? "off" : "warn"}" data-open-tab="${r.tab}" aria-label="${esc(`${r.label}: ${r.detail} — เปิดการตั้งค่าส่วนนี้`)}"><span class="ready-dot" aria-hidden="true"></span><b>${esc(r.label)}</b><small>${esc(r.detail)}</small>${icon("chevronRight", "i-sm")}</button></li>`).join("")}</ul>
+  </section>`;
+}
+
+async function pageSettings(requested) {
+  let tab = SETTINGS_TABS.some((t) => t.id === requested) ? requested : "tools";
+  setPage(tab === "ai" ? "connect" : "settings", "ตั้งค่า");
+  const [s, mcp] = await Promise.all([refreshStatus(), api("/mcp").catch(() => null)]);
   if (!s) {
     view().innerHTML = `<div class="page"><div class="form-alert error">${icon("alert")}<div>ติดต่อเซิร์ฟเวอร์ Sub360 ไม่ได้ — เปิดโปรแกรมด้วย เริ่มโปรแกรม.bat</div></div></div>`;
     return;
   }
+  view().innerHTML = `<div class="page page-stack settings-page">
+    <div class="dashboard-heading"><div><p class="eyebrow">ตั้งค่า</p><h1 style="font-size:clamp(24px,2.6vw,32px)">ตั้งค่า Sub360</h1>
+      <p class="sub">ทุกอย่างทำงานบนเครื่องนี้ — เลือกหมวดด้านล่าง หรือกดเรื่องที่ยังไม่พร้อมในแถบสรุป</p></div></div>
+    <div id="ready-slot">${readinessHtml(s, mcp)}</div>
+    <div class="settings-tabs" role="tablist" aria-label="หมวดการตั้งค่า">${SETTINGS_TABS.map((t) => `<button type="button" role="tab" class="settings-tab" id="settings-tab-${t.id}" data-tab="${t.id}" aria-controls="settings-panel" aria-selected="false" tabindex="-1">${icon(t.icon)}${esc(t.label)}</button>`).join("")}</div>
+    <div id="settings-panel" class="settings-panel" role="tabpanel"></div>
+  </div>`;
+
+  let panelCleanup = () => {};
+  const refreshReady = async () => {
+    const [st, m] = await Promise.all([refreshStatus(), api("/mcp").catch(() => null)]);
+    if (st && $("#ready-slot")) {
+      $("#ready-slot").innerHTML = readinessHtml(st, m);
+      hydrateIcons($("#ready-slot"));
+    }
+  };
+  async function open(next, { focus = false } = {}) {
+    panelCleanup();
+    panelCleanup = () => {};
+    tab = next;
+    history.replaceState(null, "", `#/settings/${next}`);
+    setPage(next === "ai" ? "connect" : "settings", "ตั้งค่า");
+    $$(".settings-tab").forEach((b) => {
+      const on = b.dataset.tab === next;
+      b.setAttribute("aria-selected", String(on));
+      b.tabIndex = on ? 0 : -1;
+    });
+    const button = $(`#settings-tab-${next}`);
+    if (focus) button?.focus();
+    // จอแคบ: แถบแท็บเลื่อนซ้ายขวาได้ — ให้เห็นแท็บที่เลือกเสมอ
+    const bar = $(".settings-tabs");
+    if (button && (button.offsetLeft < bar.scrollLeft || button.offsetLeft + button.offsetWidth > bar.scrollLeft + bar.clientWidth)) {
+      bar.scrollLeft = Math.max(0, button.offsetLeft - 12);
+    }
+    // เลื่อนลงไปอ่านแท็บยาวแล้วกดแท็บอื่น: เริ่มอ่านจากหัวแท็บ ไม่ค้างกลางหน้า
+    const top = bar.getBoundingClientRect().top + window.scrollY - 80;
+    if (window.scrollY > top) window.scrollTo({ top });
+    const panel = $("#settings-panel");
+    panel.setAttribute("aria-labelledby", `settings-tab-${next}`);
+    const st = statusCache || s;
+    if (next === "tools") renderToolsTab(panel, st, () => open("tools"));
+    else if (next === "gemini") renderGeminiTab(panel, st, async () => { statusCache = null; await refreshReady(); open("gemini"); });
+    else if (next === "ai") panelCleanup = await renderAiTab(panel, refreshReady);
+    else renderSystemTab(panel, st);
+    hydrateIcons(panel);
+  }
+
+  $(".settings-tabs").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-tab]");
+    if (b && b.dataset.tab !== tab) open(b.dataset.tab);
+  });
+  // ลูกศรซ้าย/ขวา Home/End สลับแท็บ (แบบ tab ของ WAI-ARIA)
+  $(".settings-tabs").addEventListener("keydown", (e) => {
+    const i = SETTINGS_TABS.findIndex((t) => t.id === tab);
+    const move = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: SETTINGS_TABS.length - 1 };
+    if (!(e.key in move)) return;
+    e.preventDefault();
+    open(SETTINGS_TABS[(move[e.key] + SETTINGS_TABS.length) % SETTINGS_TABS.length].id, { focus: true });
+  });
+  $("#ready-slot").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-open-tab]");
+    if (b) open(b.dataset.openTab);
+  });
+  cleanup = () => panelCleanup();
+  await open(tab);
+}
+
+function renderToolsTab(panel, s, reload) {
   const check = (ok, title, detail) => `<div class="check-row"><span class="pill ${ok ? "green" : "red"}">${ok ? `${icon("check")}พร้อม` : "ยังไม่พร้อม"}</span><div><b>${title}</b><small>${detail}</small></div></div>`;
+  const ready = s.ffmpeg && s.whisper;
+  panel.innerHTML = `<section class="panel" style="padding:21px">
+    <div class="section-heading"><div><h2>เครื่องมือบนเครื่องนี้</h2><p>ต้องมี FFmpeg และ whisper ถึงจะถอดเสียงและเรนเดอร์ได้</p></div>
+      <button class="icon-button" id="recheck" title="ตรวจใหม่" aria-label="ตรวจเครื่องมือใหม่">${icon("refresh")}</button></div>
+    ${check(s.ffmpeg, "FFmpeg", s.ffmpeg ? "ใช้ประกอบซับลงวิดีโอ" : "ยังไม่ได้ติดตั้ง")}
+    ${check(s.whisper, "whisper.cpp — ตัวถอดเสียง", s.whisper ? `โมเดล ${esc(s.whisperModel)}` : "ยังไม่ได้ติดตั้ง")}
+    ${check(s.hyperframes, "HyperFrames — ซับพรีเมียม", s.hyperframes ? "สไตล์พรีเมียมใช้งานได้" : "ถ้าไม่มี สไตล์พรีเมียมจะใช้แบบเร็วแทน")}
+    ${ready
+      ? `<details class="mcp-more"><summary>ติดตั้งใหม่หรือเปลี่ยนโมเดลถอดเสียง</summary><p class="faint" style="margin:8px 0 10px">ตัวช่วยตั้งค่าดาวน์โหลดและติดตั้งให้เอง ใช้เมื่ออยากเปลี่ยนโมเดล whisper หรือซ่อมเครื่องมือ</p><a class="button button-quiet button-sm" href="#/setup">${icon("sparkles")}เปิดตัวช่วยตั้งค่า</a></details>`
+      : `<div class="row" style="margin-top:14px"><a class="button button-primary" href="#/setup">${icon("sparkles")}ติดตั้งด้วยตัวช่วยตั้งค่า</a></div>`}
+  </section>`;
+  $("#recheck", panel).addEventListener("click", () => { statusCache = null; reload(); });
+}
+
+function renderGeminiTab(panel, s, reload) {
   const g = s.gemini;
-  view().innerHTML = `<div class="page page-stack">
-    <div class="dashboard-heading"><div><p class="eyebrow">ตั้งค่า</p><h1 style="font-size:clamp(24px,2.6vw,32px)">เครื่องมือและบริการ</h1>
-      <p class="sub">Sub360 ทำงานบนเครื่องนี้ทั้งหมด — ตรวจว่าเครื่องมือครบ และใส่ Gemini API key ถ้าต้องการใช้ AI แก้คำหรือแปลซับ</p></div>
-      <a class="button button-primary" href="#/setup">${icon("sparkles")}เปิดตัวช่วยตั้งค่า</a></div>
-    <div class="settings-grid">
-      <section class="panel" style="padding:21px">
-        <div class="section-heading"><div><h2>สถานะเครื่อง</h2><p>ต้องมี FFmpeg และ whisper ถึงจะถอดเสียงและเรนเดอร์ได้</p></div>
-          <button class="icon-button" id="recheck" title="ตรวจใหม่">${icon("refresh")}</button></div>
-        ${check(s.ffmpeg, "FFmpeg", s.ffmpeg ? "ใช้ประกอบซับลงวิดีโอ" : `ยังไม่ได้ติดตั้ง — <a href="#/setup"><u>ติดตั้งอัตโนมัติด้วยตัวช่วยตั้งค่า</u></a>`)}
-        ${check(s.whisper, "whisper.cpp — ตัวถอดเสียง", s.whisper ? `โมเดล ${esc(s.whisperModel)}` : `ยังไม่ได้ติดตั้ง — <a href="#/setup"><u>ติดตั้งอัตโนมัติด้วยตัวช่วยตั้งค่า</u></a>`)}
-        ${check(s.hyperframes, "HyperFrames — ซับพรีเมียม", s.hyperframes ? "สไตล์พรีเมียมใช้งานได้" : "รัน <code>npm install</code> ในโฟลเดอร์ Sub360 — ถ้าไม่มี สไตล์พรีเมียมจะใช้แบบเร็วแทน")}
-        ${check(g.ready, "Gemini — AI แก้คำและแปลซับ", g.ready ? `รุ่น ${esc(g.model)} · ${g.keys.length} คีย์` : "ไม่บังคับ — ใส่คีย์ในช่องด้านขวาเพื่อเปิดใช้")}
-      </section>
-      <section class="panel" style="padding:21px">
-        <div class="section-heading"><div><h2>Gemini API key</h2><p>ใช้กับปุ่ม "AI แก้คำ" และ "แปลซับ" เท่านั้น</p></div><span class="quick-icon purple">${icon("key")}</span></div>
-        <div class="step-body" style="gap:14px">
-          ${g.keys.length ? `<div class="setting-block">${g.keys.map((k) => `<div class="key-row">${icon("key")}<code>${esc(k.slot)}</code><span class="faint">ลงท้ายด้วย ••••${esc(k.last4)}</span><span class="spacer"></span>${k.slot === "GEMINI_API_KEY" ? `<button class="button button-danger button-sm" id="key-remove">ลบ</button>` : ""}</div>`).join("")}</div>` : ""}
-          <label class="field"><span>${g.ready ? "เปลี่ยนคีย์หลัก" : "วางคีย์ที่นี่"}</span>
-            <div class="row" style="flex-wrap:nowrap"><input class="input" id="key" type="password" autocomplete="off" placeholder="AIza…" /><button class="button button-primary" id="key-save">บันทึก</button></div>
-          </label>
-          <div class="form-alert">${icon("external")}<div>ขอคีย์ฟรีได้ที่ <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener"><u>Google AI Studio</u></a> · คีย์ถูกเก็บในไฟล์ <code>.env</code> บนเครื่องนี้เท่านั้น และตรวจกับ Google ก่อนบันทึก</div></div>
-          <div class="form-alert">${icon("shield")}<div><b>ข้อมูลที่ส่งออก:</b> "AI แก้คำ" ส่งเสียงของคลิป · "แปลซับ" ส่งเฉพาะข้อความซับ · การถอดเสียงและเรนเดอร์ไม่ส่งอะไรออกเลย</div></div>
-          <p class="faint">มีหลายคีย์? ใส่ <code>GEMINI_API_KEY_2</code> … <code>_9</code> ในไฟล์ .env ระบบจะสลับให้เองเมื่อโควตาเต็ม · เปลี่ยนรุ่นด้วย <code>GEMINI_MODEL</code></p>
-        </div>
-      </section>
+  panel.innerHTML = `<section class="panel" style="padding:21px">
+    <div class="section-heading"><div><h2>Gemini API key</h2><p>ใช้กับปุ่ม "AI แก้คำ" และ "แปลซับ" เท่านั้น — ไม่บังคับ</p></div><span class="quick-icon purple">${icon("key")}</span></div>
+    <div class="step-body" style="gap:14px">
+      ${g.keys.length ? `<div class="setting-block">${g.keys.map((k) => `<div class="key-row">${icon("key")}<code>${esc(k.slot)}</code><span class="faint">ลงท้ายด้วย ••••${esc(k.last4)}</span><span class="spacer"></span>${k.slot === "GEMINI_API_KEY" ? `<button class="button button-danger button-sm" id="key-remove">ลบ</button>` : ""}</div>`).join("")}</div>` : ""}
+      <label class="field"><span>${g.ready ? "เปลี่ยนคีย์หลัก" : "วางคีย์ที่นี่"}</span>
+        <div class="row" style="flex-wrap:nowrap"><input class="input" id="key" type="password" autocomplete="off" placeholder="AIza…" /><button class="button button-primary" id="key-save">บันทึก</button></div>
+      </label>
+      <div class="form-alert">${icon("external")}<div>ขอคีย์ฟรีได้ที่ <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener"><u>Google AI Studio</u></a> · คีย์ถูกเก็บในไฟล์ <code>.env</code> บนเครื่องนี้เท่านั้น และตรวจกับ Google ก่อนบันทึก</div></div>
+      <div class="form-alert">${icon("shield")}<div><b>ข้อมูลที่ส่งออก:</b> "AI แก้คำ" ส่งเสียงของคลิป · "แปลซับ" ส่งเฉพาะข้อความซับ · การถอดเสียงและเรนเดอร์ไม่ส่งอะไรออกเลย</div></div>
+      <p class="faint">มีหลายคีย์? ใส่ <code>GEMINI_API_KEY_2</code> … <code>_9</code> ในไฟล์ .env ระบบจะสลับให้เองเมื่อโควตาเต็ม · เปลี่ยนรุ่นด้วย <code>GEMINI_MODEL</code></p>
     </div>
-    <section class="panel" style="padding:21px">
+  </section>`;
+  $("#key-save", panel).addEventListener("click", async () => {
+    const key = $("#key", panel).value.trim();
+    if (!key) return toast("วางคีย์ก่อน");
+    const button = $("#key-save", panel);
+    button.disabled = true;
+    button.innerHTML = '<span class="spinner"></span>กำลังตรวจ';
+    try {
+      await api("/settings/gemini", { method: "PUT", body: { key } });
+      toast("บันทึกคีย์แล้ว — ใช้ AI แก้คำและแปลซับได้เลย");
+      reload();
+    } catch (error) {
+      toast(error.message);
+      button.disabled = false;
+      button.textContent = "บันทึก";
+    }
+  });
+  $("#key-remove", panel)?.addEventListener("click", async () => {
+    if (!(await confirmBox("ลบคีย์หลัก?", "ปุ่ม AI แก้คำและแปลซับจะใช้ไม่ได้จนกว่าจะใส่คีย์ใหม่ (ซับที่ทำไว้แล้วไม่หาย)", "ลบคีย์", "button-danger"))) return;
+    await api("/settings/gemini", { method: "DELETE" });
+    reload();
+  });
+}
+
+function renderSystemTab(panel, s) {
+  panel.innerHTML = `<section class="panel" style="padding:21px">
       <div class="section-heading"><div><h2>อัปเดตโปรแกรม</h2><p>ตรวจหาเวอร์ชันใหม่ให้เองทุกครั้งที่เปิด ดาวน์โหลดเบื้องหลัง แล้วบอกเมื่อพร้อมติดตั้ง</p></div><span class="quick-icon yellow">${icon("download")}</span></div>
       <div class="update-status" id="update-status"></div>
+      <p class="faint" style="margin-top:12px">เวอร์ชันที่ใช้อยู่: ${esc(s.version?.label || "")}</p>
     </section>
     <section class="panel" style="padding:21px">
       <div class="section-heading"><div><h2>ไฟล์อยู่ที่ไหน</h2></div><span class="quick-icon green">${icon("folder")}</span></div>
       <p class="muted" style="font-size:13px;line-height:1.75">ทุกโปรเจกต์อยู่ในโฟลเดอร์ <code>data/projects/&lt;รหัส&gt;/</code> ของ Sub360 — วิดีโอต้นฉบับ, <code>project.json</code> (ซับที่แก้ คำแปล และการตั้งค่า) และโฟลเดอร์ <code>out/</code> (MP4, SRT, ASS, VTT, TXT) ลบโปรเจกต์จากในแอปจะลบโฟลเดอร์นั้นทั้งหมด</p>
-    </section>
-  </div>`;
+    </section>`;
   renderUpdatePanel();
-  $("#recheck").addEventListener("click", () => { statusCache = null; route(); });
-  $("#key-save").addEventListener("click", async () => {
-    const key = $("#key").value.trim();
-    if (!key) return toast("วางคีย์ก่อน");
-    $("#key-save").disabled = true;
-    $("#key-save").innerHTML = '<span class="spinner"></span>กำลังตรวจ';
-    try {
-      await api("/settings/gemini", { method: "PUT", body: { key } });
-      toast("บันทึกคีย์แล้ว — ใช้ AI แก้คำและแปลซับได้เลย");
-      statusCache = null;
-      route();
-    } catch (error) {
-      toast(error.message);
-      $("#key-save").disabled = false;
-      $("#key-save").textContent = "บันทึก";
-    }
-  });
-  $("#key-remove")?.addEventListener("click", async () => {
-    if (!(await confirmBox("ลบคีย์หลัก?", "ปุ่ม AI แก้คำและแปลซับจะใช้ไม่ได้จนกว่าจะใส่คีย์ใหม่ (ซับที่ทำไว้แล้วไม่หาย)", "ลบคีย์", "button-danger"))) return;
-    await api("/settings/gemini", { method: "DELETE" });
-    statusCache = null;
-    route();
-  });
 }
 
-/* ---------- เชื่อมต่อ AI (MCP) ---------- */
-// แอป AI ในเครื่อง: คัดลอก config ไปวาง (stdio) · แอป AI บนคลาวด์: เปิด gateway + Cloudflare Tunnel แล้วอนุมัติทีละแอป
+/* ---------- แท็บเชื่อมแอป AI (MCP) ---------- */
+// หลักเดียวกับการ์ด "การเชื่อมต่อ AI (MCP)" ของ Clip360: สวิตช์หลัก (ปิดเป็นค่าเริ่มต้น), แอปในเครื่อง,
+// ทางเข้าจากอินเทอร์เน็ต (ปุ่ม Cloudflare / URL ของฉัน), แอปที่เชื่อม, ลิงก์ดูคลิป, ดูได้อย่างเดียว, กิจกรรม
 // รายละเอียดการออกแบบ: docs/MCP_PLAN.md · คู่มือผู้ใช้: docs/AI_CONNECT.md
 
 function localSnippets(cfg) {
@@ -2337,19 +2434,20 @@ function localSnippets(cfg) {
   const envFlags = Object.entries(cfg.env).map(([k, v]) => `-e ${k}=${shq(v)}`).join(" ");
   const toml = (s) => (s.includes("'") ? JSON.stringify(s) : `'${s}'`);
   return [
-    { id: "claude-desktop", name: "Claude Desktop", where: "เปิด Claude Desktop → Settings → Developer → Edit Config แล้ววางในไฟล์ <code>claude_desktop_config.json</code> (ถ้ามี <code>mcpServers</code> อยู่แล้ว ให้เพิ่มเฉพาะส่วน <code>\"sub360\"</code>) แล้วปิดเปิด Claude ใหม่", code: json },
-    { id: "claude-code", name: "Claude Code", where: "รันคำสั่งนี้ในเทอร์มินัลครั้งเดียว แล้วเปิด Claude Code ใหม่", code: `claude mcp add sub360 --scope user ${envFlags} -- ${[cfg.command, ...cfg.args].map(shq).join(" ")}` },
-    { id: "codex", name: "Codex", where: "วางท้ายไฟล์ <code>~/.codex/config.toml</code>", code: `[mcp_servers.sub360]\ncommand = ${toml(cfg.command)}\nargs = [${cfg.args.map(toml).join(", ")}]\nenv = { ${Object.entries(cfg.env).map(([k, v]) => `${k} = ${toml(v)}`).join(", ")} }` },
-    { id: "gemini-cli", name: "Gemini CLI", where: "วางใน <code>~/.gemini/settings.json</code> (ส่วน <code>mcpServers</code>)", code: json },
-    { id: "other", name: "Cursor / อื่น ๆ", where: "แอปที่ใช้รูปแบบ <code>mcpServers</code> เดียวกัน วางในไฟล์ตั้งค่า MCP ของแอปนั้น", code: json },
+    { id: "claude-desktop", name: "Claude Desktop", steps: ["เปิด Claude Desktop ไปที่ Settings → Developer → Edit Config (ไฟล์ claude_desktop_config.json)", "วางค่าด้านล่าง ถ้าในไฟล์มี “mcpServers” อยู่แล้ว ให้เพิ่มเฉพาะส่วน “sub360” เข้าไปข้างใน", "ปิด Claude Desktop ให้สนิท (รวมไอคอนที่มุมจอ) แล้วเปิดใหม่ จะเห็น Sub360 ในรายการเครื่องมือ"], label: "claude_desktop_config.json", code: json },
+    { id: "claude-code", name: "Claude Code", steps: ["รันคำสั่งนี้ครั้งเดียวในเทอร์มินัล (PowerShell) แล้วเริ่ม Claude Code ใหม่"], label: "คำสั่ง", code: `claude mcp add sub360 --scope user ${envFlags} -- ${[cfg.command, ...cfg.args].map(shq).join(" ")}` },
+    { id: "codex", name: "Codex", steps: ["เพิ่มท้ายไฟล์ ~/.codex/config.toml แล้วเปิด Codex ใหม่"], label: "config.toml", code: `[mcp_servers.sub360]\ncommand = ${toml(cfg.command)}\nargs = [${cfg.args.map(toml).join(", ")}]\nenv = { ${Object.entries(cfg.env).map(([k, v]) => `${k} = ${toml(v)}`).join(", ")} }` },
+    { id: "gemini-cli", name: "Gemini CLI", steps: ["วางในไฟล์ ~/.gemini/settings.json (ส่วน mcpServers) แล้วเปิด Gemini CLI ใหม่"], label: "settings.json", code: json },
+    { id: "other", name: "แอปอื่น", steps: ["แอปที่ใช้รูปแบบ mcpServers เดียวกัน (เช่น Cursor) วางในไฟล์ตั้งค่า MCP ของแอปนั้น"], label: "mcp.json", code: json },
   ];
 }
 
 const CLOUD_APPS = [
   ["ChatGPT", "Settings → Apps & Connectors → Advanced → เปิด Developer mode → Create → วางที่อยู่ เลือก OAuth (ไม่ต้องกรอก Client ID)"],
-  ["Claude (claude.ai / แอป)", "Settings → Connectors → Add custom connector → วางที่อยู่ → Connect"],
-  ["Gemini", "เมนูเชื่อมต่อแอป / MCP server ของ Gemini → วางที่อยู่"],
+  ["Claude บนเว็บ/มือถือ", "Settings → Connectors → Add custom connector → วางที่อยู่ → Connect"],
+  ["Gemini", "เมนูเชื่อม MCP server / Connected apps → วางที่อยู่"],
 ];
+const ACTIVITY_PREVIEW = 5;
 
 async function copyText(text, label = "คัดลอกแล้ว") {
   try {
@@ -2360,189 +2458,220 @@ async function copyText(text, label = "คัดลอกแล้ว") {
   }
 }
 
-async function pageConnect() {
-  setPage("connect", "เชื่อมต่อ AI");
-  const [cfg, first] = await Promise.all([api("/mcp/local-config"), api("/mcp/remote")]);
-  let r = first;
-  let tab = store.get("mcpTab") || "claude-desktop";
-  const snippets = localSnippets(cfg);
-  const desktopApp = Boolean(cfg.env.ELECTRON_RUN_AS_NODE);
+const whenTh = (ms) => (ms ? new Date(ms).toLocaleString("th-TH", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "ยังไม่เคย");
+const hostOf = (url) => { try { return new URL(url).host; } catch { return url; } };
 
-  view().innerHTML = `<div class="page page-stack connect-page">
-    <div class="dashboard-heading"><div><p class="eyebrow">เชื่อมต่อ AI</p><h1 style="font-size:clamp(24px,2.6vw,32px)">สั่งงาน Sub360 จากแอป AI</h1>
-      <p class="sub">พิมพ์ในแชตได้เลย เช่น "ใส่ซับไทยให้คลิป D:\\clips\\รีวิว.mp4 สไตล์คาราโอเกะ แก้คำว่ามิสทีนให้ถูก แล้วเรนเดอร์" — งานเกิดใน Sub360 เครื่องนี้ และเห็นความคืบหน้าในหน้าต่างนี้</p></div></div>
-    <section class="panel" style="padding:21px">
-      <div class="section-heading"><div><h2>แอป AI ในเครื่องนี้</h2><p>Claude Desktop, Claude Code, Codex, Gemini CLI — เรียก Sub360 ตรงในเครื่อง วิดีโอไม่ออกจากเครื่อง ไม่ต้องมีบัญชีหรือโทเค็น</p></div><span class="quick-icon green">${icon("monitor")}</span></div>
-      <div class="seg" role="tablist" id="mcp-tabs">${snippets.map((s) => `<button role="tab" data-tab="${s.id}" class="${s.id === tab ? "on" : ""}" aria-selected="${s.id === tab}">${esc(s.name)}</button>`).join("")}</div>
-      <div id="mcp-snippet" style="margin-top:14px"></div>
-      <div class="form-alert" style="margin-top:14px">${icon("help")}<div>ถ้า Sub360 ยังไม่ได้เปิด แอป AI จะเปิดให้เองเมื่อสั่งงานครั้งแรก · AI ลบโปรเจกต์ ติดตั้งเครื่องมือ หรือใส่ API key แทนคุณไม่ได้ · งานที่ส่งข้อมูลไป Gemini (AI แก้คำ แปลซับ) จะถามคุณในแชตก่อนทุกครั้ง${desktopApp ? "" : "<br/>เปิดผ่านเบราว์เซอร์ (เริ่มโปรแกรม.bat) — คำสั่งนี้ใช้ Node ในเครื่อง ถ้าติดตั้งแอป Sub360 แล้ว ให้คัดลอกจากในแอปแทน"}</div></div>
-    </section>
-    <section class="panel" style="padding:21px">
-      <div class="section-heading"><div><h2>แอป AI บนคลาวด์</h2><p>ChatGPT, Gemini, claude.ai — ผ่าน Cloudflare Tunnel ให้ที่อยู่ https ที่เปิดเฉพาะช่องสั่งงาน AI (ไม่เปิดหน้าแอปหรือไฟล์) และทุกแอปต้องได้รับอนุญาตจากหน้าต่างนี้ก่อน</p></div><span class="quick-icon purple">${icon("cloud")}</span></div>
-      <div id="remote-form"></div>
-      <div id="remote-live"></div>
-    </section>
-  </div>`;
-
-  const paintSnippet = () => {
-    const s = snippets.find((x) => x.id === tab) || snippets[0];
-    $("#mcp-snippet").innerHTML = `<p class="muted" style="font-size:13px;margin:0 0 8px">${s.where}</p>
-      <div class="code-box"><pre><code>${esc(s.code)}</code></pre><button class="button button-sm button-quiet code-copy" data-copy-snippet>${icon("copy")}คัดลอก</button></div>`;
-    hydrateIcons($("#mcp-snippet"));
-  };
-  paintSnippet();
-  $("#mcp-tabs").addEventListener("click", (e) => {
-    const b = e.target.closest("[data-tab]");
-    if (!b) return;
-    tab = b.dataset.tab;
-    store.set("mcpTab", tab);
-    $$("#mcp-tabs button").forEach((x) => { x.classList.toggle("on", x === b); x.setAttribute("aria-selected", String(x === b)); });
-    paintSnippet();
-  });
-  $("#mcp-snippet").addEventListener("click", (e) => {
-    if (e.target.closest("[data-copy-snippet]")) copyText(snippets.find((x) => x.id === tab).code, "คัดลอกแล้ว — ไปวางในแอป AI ได้เลย");
-  });
-
-  /* ----- คลาวด์: ส่วนตั้งค่า (วาดใหม่เมื่อกดเท่านั้น จะได้ไม่ทับช่องที่กำลังพิมพ์) ----- */
-  const installing = () => r.install?.state === "running";
-  function paintForm() {
-    const cf = r.cloudflared || {};
-    $("#remote-form").innerHTML = `<div class="step-body" style="gap:14px">
-      <label class="toggle"><input type="checkbox" id="remote-on" ${r.enabled ? "checked" : ""} /><div><b>เปิดให้แอป AI บนคลาวด์เชื่อมต่อ</b><small>ปิดเมื่อไร tunnel หยุดทันที · การเชื่อมที่อนุญาตไว้ยังอยู่ ยกเลิกได้ด้านล่าง</small></div></label>
-      ${r.enabled ? `
-      <div class="check-row"><span class="pill ${cf.ready ? "green" : "red"}">${cf.ready ? `${icon("check")}พร้อม` : "ยังไม่มี"}</span><div><b>cloudflared</b><small>${cf.ready ? `รุ่น ${esc(cf.version)}` : "โปรแกรมของ Cloudflare ที่ทำ tunnel (~60 MB)"}</small></div>
-        ${cf.ready ? "" : `<span class="spacer"></span><button class="button button-primary button-sm" id="cf-install" ${installing() ? "disabled" : ""}>${installing() ? '<span class="spinner"></span>กำลังติดตั้ง' : `${icon("download")}ติดตั้ง`}</button>`}</div>
-      ${installing() ? `<div class="progress"><span style="width:${r.install.pct || 0}%"></span></div><p class="faint">${esc(r.install.message || "")}</p>` : ""}
-      ${r.install?.state === "failed" ? `<div class="form-alert error">${icon("alert")}<div>${esc(r.install.error)}</div></div>` : ""}
-      <div class="field"><span>ที่อยู่สำหรับแอป AI</span>
-        <div class="seg" id="remote-mode"><button data-mode="quick" class="${r.mode !== "named" ? "on" : ""}">ชั่วคราว (ไม่ต้องมีบัญชี)</button><button data-mode="named" class="${r.mode === "named" ? "on" : ""}">ถาวร (โดเมนบน Cloudflare)</button></div></div>
-      ${r.mode === "named" ? `
-        <div class="form-alert">${icon("help")}<div>ใน Cloudflare Zero Trust → Networks → Tunnels → สร้าง tunnel แล้วเพิ่ม Public Hostname ให้ชี้ไปที่ <code>http://localhost:${r.gateway?.port || 4370}</code> จากนั้นคัดลอกคำสั่งติดตั้ง (ที่มีโทเค็น <code>eyJ…</code>) มาวางที่นี่</div></div>
-        <label class="field"><span>ชื่อโดเมน</span><input class="input" id="remote-host" placeholder="sub360.example.com" value="${esc(r.hostname)}" autocomplete="off" /></label>
-        <label class="field"><span>โทเค็น tunnel ${r.hasToken ? "<small>บันทึกไว้แล้ว — วางใหม่เพื่อเปลี่ยน</small>" : ""}</span><input class="input" id="remote-token" type="password" placeholder="${r.hasToken ? "••••••••" : "วางคำสั่งหรือโทเค็น eyJ…"}" autocomplete="off" /></label>
-        <div class="row"><button class="button button-primary" id="remote-save">บันทึกและเชื่อมต่อ</button></div>`
-      : `<p class="faint">ที่อยู่ชั่วคราวเปลี่ยนทุกครั้งที่เปิด Sub360 ใหม่ ต้องเพิ่มการเชื่อมต่อในแอป AI ใหม่ทุกครั้ง — เหมาะกับการลองใช้ ถ้าใช้ประจำให้ใช้แบบถาวร</p>`}` : ""}
-    </div>`;
-    hydrateIcons($("#remote-form"));
-  }
-
-  const stateLabel = { off: ["ปิดอยู่", ""], starting: ["กำลังเชื่อมต่อ…", "yellow"], connected: ["เชื่อมต่อแล้ว", "green"], error: ["มีปัญหา", "red"] };
-  const clockTime = (ms) => new Date(ms).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
-
-  // การเชื่อมใหม่เริ่มที่นี่เสมอ: กดแล้วได้รหัสไปพิมพ์ในหน้าที่แอป AI เปิดขึ้นมา (คำขอที่คุณไม่ได้เริ่มจะไม่ผ่าน)
-  function pairingHtml(p) {
-    if (p.open) {
-      const asking = p.open.requesters || [];
-      const who = asking.length
-        ? `<div><b>${asking.map((x) => `${esc(x.clientName)} <small class="faint">(${esc(x.redirectHost)})</small>`).join(" · ")}</b> ขอเชื่อมต่อ</div>`
-        : `<div><b>พร้อมเชื่อมแอป AI ใหม่</b></div>`;
-      return `<div class="pending-card" role="status">
-        ${who}
-        <div class="pair-code" aria-label="รหัสเชื่อมต่อ">${esc(p.open.code)}</div>
-        <p class="muted" style="margin:0;font-size:13px">${asking.length ? "พิมพ์รหัสนี้ในหน้าที่แอป AI เปิดขึ้นมาในเบราว์เซอร์" : "ในแอป AI กดเพิ่มการเชื่อมต่อด้วยที่อยู่ข้างบน แล้วพิมพ์รหัสนี้ในหน้าที่เปิดขึ้นมา"} · ใช้ได้ครั้งเดียว ถึง ${clockTime(p.open.expiresAt)} น.</p>
-        ${asking.length > 1 ? `<div class="form-alert error">${icon("alert")}<div>มีมากกว่าหนึ่งแอปขอเชื่อมต่อพร้อมกัน — ถ้ามีแอปที่คุณไม่ได้เพิ่งเชื่อมเอง ให้กดยกเลิก แล้วเริ่มใหม่จากแอปของคุณ</div></div>` : ""}
-        <div class="form-alert">${icon("shield")}<div>อย่าบอกรหัสนี้กับใคร และอย่าพิมพ์ในเว็บที่คนอื่นส่งมาให้ — ใครได้รหัสไปจะสั่งงาน Sub360 บนเครื่องนี้ได้ (ยกเว้นลบโปรเจกต์)</div></div>
-        <div class="row"><button class="button button-quiet button-sm" data-pair-cancel>ยกเลิก</button></div></div>`;
-    }
-    const done = p.lastConnected && Date.now() - p.lastConnected.at < 10 * 60_000
-      ? `<div class="form-alert ok">${icon("check")}<div>เชื่อม <b>${esc(p.lastConnected.clientName)}</b> (${esc(p.lastConnected.redirectHost)}) แล้ว — ถ้าไม่ใช่แอปที่คุณเพิ่งเชื่อม ให้กดยกเลิกในรายการด้านล่าง</div></div>` : "";
-    const locked = p.autoLockedUntil
-      ? `<div class="form-alert error">${icon("alert")}<div>มีการพิมพ์รหัสผิดหลายครั้ง — หยุดแสดงรหัสอัตโนมัติถึง ${clockTime(p.autoLockedUntil)} น. ถ้าคุณกำลังเชื่อมแอปเอง กดปุ่มด้านล่างเพื่อรับรหัสใหม่</div></div>` : "";
-    return `${done}${locked}<div class="row" style="align-items:center;gap:12px"><button class="button button-primary" data-pair-start>${icon("plus")}เชื่อมแอป AI ใหม่</button>
-      <small class="faint" style="flex:1;min-width:200px">เพิ่มการเชื่อมต่อในแอป AI ได้เลย รหัส 6 หลักจะขึ้นที่นี่เองเมื่อแอปเปิดหน้าขอเชื่อมต่อ (หรือกดปุ่มนี้เพื่อรับรหัสก่อน)</small></div>`;
-  }
-  let liveKey = "";
-  function paintLive() {
-    if (!r.enabled) { $("#remote-live").innerHTML = ""; liveKey = ""; return; }
-    const key = JSON.stringify([r.tunnel, r.mcpUrl, r.problem, r.pairing, r.connections]);
-    if (key === liveKey) return;
-    liveKey = key;
-    const [label, cls] = stateLabel[r.tunnel?.state] || stateLabel.off;
-    $("#remote-live").innerHTML = `<div class="step-body" style="gap:14px;margin-top:16px">
-      <div class="check-row"><span class="pill ${cls}">${r.tunnel?.state === "starting" ? '<span class="spinner" style="width:10px;height:10px"></span>' : ""}${label}</span><div><b>Cloudflare Tunnel</b><small>${esc(r.problem || r.tunnel?.error || (r.mcpUrl ? "พร้อมรับการเชื่อมต่อ" : "รอสักครู่"))}</small></div>
-        ${r.tunnel?.state === "error" ? `<span class="spacer"></span><button class="button button-quiet button-sm" id="remote-restart">${icon("refresh")}ลองใหม่</button>` : ""}</div>
-      ${r.mcpUrl ? `<div class="field"><span>ที่อยู่ที่ต้องวางในแอป AI</span>
-        <div class="code-box"><pre><code>${esc(r.mcpUrl)}</code></pre><button class="button button-sm button-primary code-copy" data-copy-url>${icon("copy")}คัดลอก</button></div></div>
-        <div class="setting-block">${CLOUD_APPS.map(([n, how]) => `<div class="key-row" style="align-items:flex-start">${icon("external")}<div><b style="font-weight:500">${esc(n)}</b><br/><small class="faint">${esc(how)}</small></div></div>`).join("")}</div>` : ""}
-      ${r.mcpUrl ? pairingHtml(r.pairing || {}) : ""}
-      <div class="field"><span>แอปที่เชื่อมไว้</span>
-        ${r.connections.length ? `<div class="setting-block">${r.connections.map((c) => `<div class="key-row">${icon("plug")}<div><b style="font-weight:500">${esc(c.clientName)}</b> <small class="faint">${esc(c.redirectHost)} · เชื่อมเมื่อ ${fmtDate(new Date(c.createdAt).toISOString())}${c.lastUsedAt ? ` · ใช้ล่าสุด ${fmtDate(new Date(c.lastUsedAt).toISOString())}` : ""}</small></div><span class="spacer"></span><button class="button button-danger button-sm" data-revoke="${esc(c.id)}">ยกเลิก</button></div>`).join("")}</div>
-          ${r.connections.length > 1 ? `<button class="button button-quiet button-sm" data-revoke-all style="justify-self:start">ยกเลิกทั้งหมด</button>` : ""}
-          <p class="faint" style="margin:0">แอป AI ได้ลิงก์ออนไลน์ของวิดีโอที่เรนเดอร์แล้ว (เปิดได้ 3 วัน ขณะที่ Sub360 และ tunnel เปิดอยู่ ใครมีลิงก์ก็เปิดได้) <button class="link-button" data-reset-links>ยกเลิกลิงก์ที่เคยให้ไปทั้งหมด</button></p>`
-        : `<p class="faint" style="margin:0">ยังไม่มี — กด "เชื่อมแอป AI ใหม่" แล้วเพิ่มที่อยู่ข้างบนในแอป AI</p>`}</div>
-    </div>`;
-    hydrateIcons($("#remote-live"));
-  }
-
-  const apply = async (body) => {
-    try {
-      r = await api("/mcp/remote", { method: "PUT", body });
-      paintForm();
-      paintLive();
-    } catch (error) {
-      toast(error.message);
-    }
-  };
-  paintForm();
-  paintLive();
-
-  $("#remote-form").addEventListener("change", (e) => {
-    if (e.target.id === "remote-on") apply({ enabled: e.target.checked });
-  });
-  $("#remote-form").addEventListener("click", async (e) => {
-    const mode = e.target.closest("[data-mode]");
-    if (mode && mode.dataset.mode !== r.mode) return apply({ mode: mode.dataset.mode });
-    if (e.target.closest("#cf-install")) {
-      r.install = (await api("/setup/cloudflared", { method: "POST" })).installs.cloudflared;
-      return paintForm();
-    }
-    if (e.target.closest("#remote-save")) {
-      const body = { hostname: $("#remote-host").value };
-      if ($("#remote-token").value.trim()) body.token = $("#remote-token").value;
-      await apply(body);
-      if (!r.problem) toast("บันทึกแล้ว กำลังเชื่อมต่อ tunnel");
-    }
-  });
-  $("#remote-live").addEventListener("click", async (e) => {
-    const t = e.target.closest("button");
-    if (!t) return;
-    try {
-      if (t.matches("[data-copy-url]")) return copyText(r.mcpUrl, "คัดลอกที่อยู่แล้ว — ไปวางในแอป AI");
-      if (t.id === "remote-restart") r = await api("/mcp/remote/restart", { method: "POST" });
-      if (t.matches("[data-pair-start]")) r = await api("/mcp/remote/pairing", { method: "POST" });
-      if (t.matches("[data-pair-cancel]")) r = await api("/mcp/remote/pairing", { method: "DELETE" });
-      if (t.dataset.revoke) {
-        const c = r.connections.find((x) => x.id === t.dataset.revoke);
-        if (!(await confirmBox(`ยกเลิกการเชื่อมต่อ ${esc(c?.clientName || "")}?`, "แอปนี้จะสั่งงาน Sub360 ไม่ได้ทันที ถ้าต้องการใช้อีกต้องเชื่อมต่อและอนุญาตใหม่", "ยกเลิกการเชื่อมต่อ", "button-danger"))) return;
-        r = await api(`/mcp/remote/connections/${t.dataset.revoke}`, { method: "DELETE" });
-      }
-      if (t.matches("[data-revoke-all]")) {
-        if (!(await confirmBox("ยกเลิกทุกการเชื่อมต่อ?", "ทุกแอป AI บนคลาวด์จะสั่งงาน Sub360 ไม่ได้ทันที", "ยกเลิกทั้งหมด", "button-danger"))) return;
-        r = await api("/mcp/remote/connections", { method: "DELETE" });
-      }
-      if (t.matches("[data-reset-links]")) {
-        if (!(await confirmBox("ยกเลิกลิงก์ออนไลน์ทั้งหมด?", "ลิงก์วิดีโอและซับที่เคยให้แอป AI ไปจะเปิดไม่ได้ทันที แอป AI ขอลิงก์ใหม่ได้จากโปรเจกต์เดิม", "ยกเลิกลิงก์", "button-danger"))) return;
-        r = await api("/mcp/remote/links", { method: "DELETE" });
-        toast("ยกเลิกลิงก์ทั้งหมดแล้ว");
-      }
-      paintLive();
-    } catch (error) {
-      toast(error.message);
-      r = await api("/mcp/remote");
-      paintLive();
-    }
-  });
-
-  const timer = setInterval(async () => {
-    try {
-      const wasInstalling = installing();
-      r = await api("/mcp/remote");
-      if (wasInstalling || installing()) paintForm();
-      paintLive();
-    } catch { /* ลองรอบหน้า */ }
-  }, 2000);
-  cleanup = () => clearInterval(timer);
+function codeBox(label, value, attr) {
+  return `<div class="field"><span>${esc(label)}</span><div class="code-box"><pre><code>${esc(value)}</code></pre><button type="button" class="button button-sm button-quiet code-copy" ${attr}>${icon("copy")}คัดลอก</button></div></div>`;
 }
+
+/** การจับคู่: รหัสอยู่ในหน้าต่างนี้เท่านั้น แอป AI ได้รหัสจากคนที่พิมพ์ในหน้าที่แอปเปิด */
+function pairingCardHtml(p) {
+  if (!p?.open) return "";
+  const asking = p.open.requesters || [];
+  const until = new Date(p.open.expiresAt).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+  return `<div class="pending-card" role="status">
+    <div><b>${asking.length ? `${asking.map((x) => `${esc(x.clientName)} <small class="faint">(${esc(x.redirectHost)})</small>`).join(" · ")} ขอเชื่อมกับ Sub360` : "พร้อมเชื่อมแอป AI ใหม่"}</b></div>
+    <div class="pair-code" aria-label="รหัสเชื่อมต่อ">${esc(p.open.code)}</div>
+    <p class="muted" style="margin:0;font-size:13px">${asking.length ? "พิมพ์รหัสนี้ในหน้าที่แอป AI เปิดขึ้นมาในเบราว์เซอร์" : "เพิ่มการเชื่อมต่อในแอป AI ด้วยที่อยู่ด้านล่าง แล้วพิมพ์รหัสนี้ในหน้าที่เปิดขึ้นมา"} · ใช้ได้ครั้งเดียว ถึง ${until} น.</p>
+    ${asking.length > 1 ? `<div class="form-alert error">${icon("alert")}<div>มีมากกว่าหนึ่งแอปขอเชื่อมพร้อมกัน — ถ้ามีแอปที่คุณไม่ได้เพิ่งเชื่อมเอง ให้กดยกเลิก แล้วเริ่มใหม่จากแอปของคุณ</div></div>` : ""}
+    <div class="form-alert">${icon("shield")}<div>ถ้าคุณไม่ได้กำลังเชื่อมแอปไหน ไม่ต้องทำอะไร · อย่าบอกรหัสนี้กับใคร และอย่าพิมพ์ในเว็บที่คนอื่นส่งมาให้</div></div>
+    <div class="row"><button type="button" class="button button-quiet button-sm" data-act="pair-cancel">ยกเลิก</button></div></div>`;
+}
+
+async function renderAiTab(panel, onChanged) {
+  let r = await api("/mcp");
+  let localTab = store.get("mcpTab") || "claude-desktop";
+  let showCustom = r.remote.mode === "custom";
+  let customUrl = r.remote.customUrl || "";
+  let allActivity = false;
+  let busy = false;
+  let stopped = false;
+  let timer = 0;
+  let lastKey = "";
+
+  const installing = () => r.install?.state === "running";
+  const waiting = () => Boolean(r.pairing?.open) || installing() || r.remote.tunnel.state === "starting";
+
+  function remoteHtml() {
+    const rm = r.remote;
+    const notice = rm.notice ? `<div class="mcp-notice" role="status"><div><b>${rm.notice.reason === "restart" ? "ที่อยู่ทางเข้าเดิมใช้ไม่ได้แล้ว" : "ที่อยู่ทางเข้าเปลี่ยนแล้ว"}</b>
+      <p>${rm.notice.apps?.length ? `Sub360 ยกเลิกการเชื่อมเดิมของ ${esc(rm.notice.apps.join(", "))} ให้แล้ว ` : ""}ถ้าเคยเพิ่ม Sub360 ไว้ในแอป AI ด้วยที่อยู่${rm.notice.oldUrl ? ` ${esc(hostOf(rm.notice.oldUrl))}` : "เดิม"} ให้ลบตัวเชื่อมนั้นในแอป AI แล้วเพิ่มใหม่ด้วยที่อยู่ปัจจุบัน${rm.mode !== "custom" ? " · ถ้าไม่อยากทำแบบนี้ทุกครั้ง ใช้ tunnel ของคุณเองที่ที่อยู่ไม่เปลี่ยน ผ่าน \"ใช้ URL ของฉัน\"" : ""}</p></div>
+      <button type="button" class="link-button" data-act="notice">รับทราบ</button></div>` : "";
+    if (rm.publicMcpUrl) {
+      return `${notice}${codeBox("ที่อยู่สำหรับวางในแอป AI", rm.publicMcpUrl, 'data-act="copy-url"')}
+        ${rm.mode === "quick" ? `<p class="mcp-warn">${icon("alert", "i-sm")}ที่อยู่นี้เปลี่ยนทุกครั้งที่เปิดทางเข้าใหม่ และปิดเองเมื่อปิด Sub360 เปิดใหม่แล้วต้องลบตัวเชื่อมเดิมในแอป AI แล้วเพิ่มใหม่ — ถ้าต้องการที่อยู่คงที่ ใช้ tunnel ของคุณเอง</p>` : `<p class="faint">ใช้ URL ของคุณ: tunnel ต้องชี้มาที่ <code>http://127.0.0.1:${rm.gatewayPort}</code> และเปิดอยู่ตลอด</p>`}
+        <details class="mcp-more"><summary>วิธีเพิ่มในแต่ละแอป</summary><ul class="mcp-steps">${CLOUD_APPS.map(([n, how]) => `<li><b>${esc(n)}:</b> ${esc(how)}</li>`).join("")}</ul>
+          <p class="faint">หลังกด Connect หน้าเว็บจะขอรหัส 6 หลัก — Sub360 แจ้งรหัสให้เองในหน้านี้ (และแจ้งเตือน Windows)</p></details>
+        ${r.pairing?.open ? "" : `<div class="row" style="align-items:center;gap:12px"><button type="button" class="button button-quiet button-sm" data-act="pair-start">${icon("plus")}รับรหัสเชื่อมแอปใหม่</button><small class="faint" style="flex:1;min-width:200px">ปกติไม่ต้องกด รหัสจะขึ้นเองเมื่อแอป AI เปิดหน้าขอเชื่อม${r.pairing?.autoLockedUntil ? " · ตอนนี้หยุดแสดงรหัสเองชั่วคราวเพราะมีคนพิมพ์รหัสผิดหลายครั้ง" : ""}</small></div>`}
+        <div class="row"><button type="button" class="button button-quiet" data-act="remote-off">${icon("x")}ปิดทางเข้าจากอินเทอร์เน็ต</button></div>`;
+    }
+    const cf = r.cloudflared || {};
+    const t = rm.tunnel || {};
+    const status = installing()
+      ? `<p class="mcp-note"><span class="spinner"></span>${esc(r.install.message || "กำลังติดตั้ง cloudflared")} ${r.install.pct ? `${r.install.pct}%` : ""}</p>`
+      : t.state === "starting" ? `<p class="mcp-note"><span class="spinner"></span>กำลังเปิดทางเข้า…</p>` : "";
+    const problem = rm.problem || (t.state === "error" ? t.error : "") || (r.install?.state === "failed" ? r.install.error : "");
+    return `${notice}${status}
+      ${problem ? `<div class="form-alert error" role="alert">${icon("alert")}<div>${esc(problem)}</div></div>` : ""}
+      <div class="row" style="gap:10px;align-items:center">
+        ${cf.ready
+          ? `<button type="button" class="button button-primary" data-act="remote-quick" ${busy || installing() || t.state === "starting" ? "disabled" : ""}>${icon("cloud")}เปิดทางเข้าด้วย Cloudflare</button>`
+          : `<button type="button" class="button button-primary" data-act="install-cf" ${busy || installing() ? "disabled" : ""}>${icon("download")}ติดตั้ง cloudflared แล้วเปิดทางเข้า</button>`}
+        <button type="button" class="link-button" data-act="toggle-custom" aria-expanded="${showCustom}">ใช้ URL ของฉัน</button>
+      </div>
+      <p class="faint">ไม่ต้องสมัครอะไร แต่ที่อยู่เปลี่ยนทุกครั้งที่เปิดใหม่ และปิดเองเมื่อปิด Sub360 ถ้ามี tunnel ของคุณเองที่ที่อยู่ไม่เปลี่ยน (เช่น Cloudflare Tunnel ที่ผูกโดเมนของคุณ) ใช้ "ใช้ URL ของฉัน"${cf.ready ? "" : " · ครั้งแรกจะดาวน์โหลด cloudflared ของ Cloudflare (ราว 55 MB ตรวจลายนิ้วมือไฟล์ก่อนใช้)"}</p>
+      ${showCustom ? `<form class="mcp-custom" data-form="custom">
+        <label class="field" for="mcp-custom-url"><span>ที่อยู่ https ของ tunnel ที่ชี้มาที่ <code>http://127.0.0.1:${rm.gatewayPort}</code></span></label>
+        <div class="row" style="flex-wrap:nowrap"><input class="input" id="mcp-custom-url" type="url" inputmode="url" placeholder="https://sub360.example.com" value="${esc(customUrl)}" autocomplete="off" />
+          <button type="submit" class="button button-quiet" ${busy ? "disabled" : ""}>ใช้ที่อยู่นี้</button></div>
+        <p class="faint">เช่น Cloudflare Zero Trust → Networks → Tunnels → สร้าง tunnel แล้วรันคำสั่งติดตั้ง (cloudflared service install …) บนเครื่องนี้ เพิ่ม Public Hostname ชี้ไปที่ <code>http://localhost:${rm.gatewayPort}</code> — tunnel ทำงานเป็น service เอง ที่อยู่ไม่เปลี่ยน และการเชื่อมในแอป AI ใช้ได้ตลอด</p>
+      </form>` : ""}`;
+  }
+
+  function cardHtml() {
+    const all = localSnippets(r.local);
+    const local = all.find((x) => x.id === localTab) || all[0];
+    const activity = r.activity || [];
+    return `<section class="panel mcp-card" style="padding:21px" aria-labelledby="mcp-title">
+      <div class="section-heading"><div><h2 id="mcp-title">การเชื่อมต่อ AI (MCP)</h2>
+        <p>สั่ง Claude, ChatGPT, Gemini หรือ Codex ให้ใส่ซับจากแชต เช่น “ใส่ซับไทยให้คลิป D:\\clips\\รีวิว.mp4 แก้คำว่ามิสทีน แล้วเรนเดอร์” แอป AI ทำได้เท่าที่ Sub360 อนุญาต และต้องยืนยันก่อนส่งข้อมูลไป Gemini หรือเขียนทับซับ</p></div>
+        <label class="mcp-switch"><input type="checkbox" role="switch" data-act="enabled" aria-label="เปิดให้แอป AI สั่งงาน Sub360" ${r.enabled ? "checked" : ""} ${busy ? "disabled" : ""} /><span>${r.enabled ? "เปิดอยู่" : "ปิดอยู่"}</span></label></div>
+      ${pairingCardHtml(r.pairing)}
+      ${!r.enabled ? `<p class="mcp-note">ตอนนี้ปิดอยู่ ไม่มีแอป AI ใดเข้าถึง Sub360 ได้ เปิดเมื่อต้องการใช้ ปิดเมื่อไหร่การเชื่อมทุกแบบจะหยุดทันที</p>` : `
+      <h3 class="mcp-heading">${icon("monitor", "i-sm")}แอปบนคอมพิวเตอร์เครื่องนี้</h3>
+      <div class="seg mcp-local-tabs" role="tablist" aria-label="เลือกแอป AI">${all.map((x) => `<button type="button" role="tab" data-local="${x.id}" class="${x.id === local.id ? "on" : ""}" aria-selected="${x.id === local.id}">${esc(x.name)}</button>`).join("")}</div>
+      <div role="tabpanel" class="mcp-local">
+        <ol class="mcp-steps">${local.steps.map((step) => `<li>${esc(step)}</li>`).join("")}</ol>
+        ${codeBox(local.label, local.code, 'data-act="copy-local"')}
+        <p class="faint">ค่านี้ไม่มีโทเค็นอยู่ข้างใน ตัวเชื่อมคุยกับ Sub360 บนเครื่องนี้เอง และเปิด Sub360 ให้ถ้ายังไม่ได้เปิด${r.local.env.ELECTRON_RUN_AS_NODE ? "" : " · ตอนนี้เปิดผ่านเบราว์เซอร์ คำสั่งนี้ใช้ Node ในเครื่อง ถ้าติดตั้งแอป Sub360 แล้ว ให้คัดลอกจากในแอปแทน"}</p>
+      </div>
+
+      <h3 class="mcp-heading">${icon("cloud", "i-sm")}ChatGPT · Claude บนเว็บ · Gemini</h3>
+      <p class="faint">แอปเหล่านี้ทำงานบนเซิร์ฟเวอร์ของผู้ให้บริการ ต้องเปิดทางเข้าจากอินเทอร์เน็ตมาที่เครื่องนี้ก่อน ผ่านทางนี้เข้าได้แค่ส่วน MCP (หน้าแอปและไฟล์อื่นเข้าไม่ได้) และทุกแอปต้องพิมพ์รหัสที่ขึ้นในหน้านี้ก่อนจึงเชื่อมได้</p>
+      ${remoteHtml()}
+
+      <h3 class="mcp-heading">${icon("shield", "i-sm")}แอปที่เชื่อมผ่านอินเทอร์เน็ต</h3>
+      ${r.connections.length ? `<ul class="mcp-list">${r.connections.map((c) => `<li><span><b>${esc(c.clientName)}</b> <small class="faint">${esc(c.redirectHost)} · ใช้ล่าสุด ${whenTh(c.lastUsedAt)}</small></span><button type="button" class="link-button" data-revoke="${esc(c.id)}">ยกเลิก</button></li>`).join("")}</ul>
+        ${r.connections.length > 1 ? `<button type="button" class="link-button" data-act="revoke-all">ยกเลิกทั้งหมด</button>` : ""}` : `<p class="faint">ยังไม่มี</p>`}
+
+      <h3 class="mcp-heading">${icon("film", "i-sm")}ลิงก์ดูคลิป</h3>
+      <p class="faint">แอป AI ส่งลิงก์ดูและดาวน์โหลดวิดีโอที่เรนเดอร์เสร็จให้คุณได้ ลิงก์ใช้ได้ 7 วัน เปิดจากมือถือได้เมื่อเปิดทางเข้าจากอินเทอร์เน็ตด้านบน ใครได้ลิงก์ไปก็ดูวิดีโอนั้นได้จนหมดอายุ ไฟล์ส่งจากเครื่องนี้โดยตรง ไม่อัปโหลดไปที่ไหน</p>
+      <div class="mcp-row"><span>ลิงก์ที่ยังใช้ได้: ${r.videoLinks}</span>${r.videoLinks ? `<button type="button" class="link-button" data-act="links-clear">ยกเลิกลิงก์ทั้งหมด</button>` : ""}</div>
+
+      <label class="toggle" style="margin-top:14px"><input type="checkbox" data-act="read-only" ${r.writeEnabled ? "" : "checked"} /><div><b>ให้แอป AI ดูข้อมูลได้อย่างเดียว</b><small>หยุดการสร้าง แก้ไข และเรนเดอร์ทุกอย่างชั่วคราว</small></div></label>
+
+      ${activity.length ? `<h3 class="mcp-heading">สิ่งที่แอป AI ทำล่าสุด</h3>
+        <ul class="mcp-list mcp-activity">${activity.slice(0, allActivity ? undefined : ACTIVITY_PREVIEW).map((a) => `<li><span>${icon(a.ok ? "check" : "x", "i-sm")} ${esc(a.summary || a.tool)}</span><small class="faint">${esc(a.app)} · ${whenTh(a.at)}</small></li>`).join("")}</ul>
+        ${activity.length > ACTIVITY_PREVIEW ? `<button type="button" class="link-button" data-act="activity-all" aria-expanded="${allActivity}">${allActivity ? "ย่อรายการ" : `ดูทั้งหมด (${activity.length} รายการ)`}</button>` : ""}` : ""}
+      `}
+    </section>`;
+  }
+
+  function paint(force = false) {
+    const key = JSON.stringify([r, localTab, showCustom, allActivity, busy]);
+    if (!force && key === lastKey) return;
+    // กำลังพิมพ์ URL อยู่: ไม่วาดทับช่องที่พิมพ์
+    if (!force && document.activeElement?.id === "mcp-custom-url") return;
+    lastKey = key;
+    panel.innerHTML = cardHtml();
+    hydrateIcons(panel);
+  }
+
+  async function run(action) {
+    busy = true;
+    paint(true);
+    try {
+      r = await action();
+    } catch (error) {
+      toast(error.message);
+      r = await api("/mcp").catch(() => r);
+    } finally {
+      busy = false;
+      paint(true);
+      onChanged?.();
+    }
+  }
+
+  panel.addEventListener("click", async (e) => {
+    const t = e.target.closest("button");
+    if (!t || t.disabled) return;
+    const act = t.dataset.act;
+    if (t.dataset.local) {
+      localTab = t.dataset.local;
+      store.set("mcpTab", localTab);
+      return paint(true);
+    }
+    if (act === "copy-local") return copyText(localSnippets(r.local).find((x) => x.id === localTab)?.code || "", "คัดลอกแล้ว — ไปวางในแอป AI ได้เลย");
+    if (act === "copy-url") return copyText(r.remote.publicMcpUrl, "คัดลอกที่อยู่แล้ว — ไปวางในแอป AI");
+    if (act === "toggle-custom") { showCustom = !showCustom; return paint(true); }
+    if (act === "activity-all") { allActivity = !allActivity; return paint(true); }
+    if (act === "remote-quick") return run(() => api("/mcp/remote", { method: "PUT", body: { mode: "quick" } }));
+    if (act === "remote-off") return run(() => api("/mcp/remote", { method: "PUT", body: { mode: "off" } }));
+    if (act === "install-cf") {
+      return run(async () => {
+        await api("/setup/cloudflared", { method: "POST" });
+        return api("/mcp");
+      });
+    }
+    if (act === "pair-start") return run(() => api("/mcp/pairing", { method: "POST" }));
+    if (act === "pair-cancel") return run(() => api("/mcp/pairing", { method: "DELETE" }));
+    if (act === "notice") return run(() => api("/mcp/notice", { method: "DELETE" }));
+    if (act === "links-clear") {
+      if (!(await confirmBox("ยกเลิกลิงก์ดูคลิปทั้งหมด?", "ลิงก์ที่เคยให้แอป AI ไปจะเปิดไม่ได้ทันที ขอลิงก์ใหม่ได้จากแอป AI", "ยกเลิกลิงก์", "button-danger"))) return;
+      return run(() => api("/mcp/video-links", { method: "DELETE" }));
+    }
+    if (act === "revoke-all") {
+      if (!(await confirmBox("ยกเลิกทุกการเชื่อมต่อ?", "ทุกแอป AI บนคลาวด์จะสั่งงาน Sub360 ไม่ได้ทันที", "ยกเลิกทั้งหมด", "button-danger"))) return;
+      return run(() => api("/mcp/connections", { method: "DELETE" }));
+    }
+    if (t.dataset.revoke) {
+      const c = r.connections.find((x) => x.id === t.dataset.revoke);
+      if (!(await confirmBox(`ยกเลิกการเชื่อมต่อ ${esc(c?.clientName || "")}?`, "แอปนี้จะสั่งงาน Sub360 ไม่ได้ทันที ถ้าต้องการใช้อีกต้องเชื่อมใหม่", "ยกเลิกการเชื่อมต่อ", "button-danger"))) return;
+      return run(() => api(`/mcp/connections/${t.dataset.revoke}`, { method: "DELETE" }));
+    }
+  });
+  panel.addEventListener("change", (e) => {
+    const act = e.target.dataset?.act;
+    if (act === "enabled") run(() => api("/mcp/enabled", { method: "POST", body: { enabled: e.target.checked } }));
+    if (act === "read-only") run(() => api("/mcp/write", { method: "POST", body: { enabled: !e.target.checked } }));
+  });
+  panel.addEventListener("input", (e) => {
+    if (e.target.id === "mcp-custom-url") customUrl = e.target.value;
+  });
+  panel.addEventListener("submit", (e) => {
+    if (e.target.dataset.form !== "custom") return;
+    e.preventDefault();
+    run(() => api("/mcp/remote", { method: "PUT", body: { mode: "custom", url: customUrl.trim() } }));
+  });
+
+  // สถานะ poll ได้บ่อย — ถี่ขึ้นตอนมีรหัสรออยู่ tunnel กำลังเปิด หรือกำลังติดตั้ง cloudflared
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const wasOpen = Boolean(r.pairing?.open);
+      const wasInstalling = installing();
+      r = await api("/mcp");
+      // ติดตั้ง cloudflared เสร็จ → เปิดทางเข้าต่อให้เลย (ผู้ใช้กดปุ่มเดียว)
+      if (wasInstalling && r.install?.state === "done" && r.remote.mode !== "quick") {
+        r = await api("/mcp/remote", { method: "PUT", body: { mode: "quick" } });
+      }
+      paint();
+      if (wasOpen && !r.pairing?.open && r.pairing?.lastConnected) {
+        toast(`เชื่อม ${r.pairing.lastConnected.clientName} แล้ว`);
+        onChanged?.();
+      }
+    } catch { /* ลองรอบหน้า */ }
+    if (!stopped) timer = setTimeout(tick, waiting() ? 1500 : 6000);
+  };
+  paint(true);
+  timer = setTimeout(tick, waiting() ? 1500 : 6000);
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
+}
+
 
 /* ---------- อัปเดตโปรแกรม ---------- */
 // แอป Windows ตรวจและดาวน์โหลดเวอร์ชันใหม่เองอยู่เบื้องหลัง (electron/main.cjs) — ส่วนนี้ทำให้ผู้ใช้เห็นว่าถึงไหนแล้ว
@@ -2723,19 +2852,35 @@ hydrateIcons();
 window.addEventListener("hashchange", route);
 refreshStatus();
 setInterval(refreshSidebar, 5000);
-// แอป AI บนคลาวด์เปิดหน้าขอเชื่อมต่อ → พาไปหน้าเชื่อมต่อ AI ที่แสดงรหัส (แอป Windows ดึงหน้าต่างขึ้นมาให้ด้วย)
-let pairingSeen = "";
+// แอป AI บนคลาวด์รอรหัสจับคู่ → แถบแจ้งพร้อมรหัสบนทุกหน้า ไม่สลับหน้าเอง (กันงานที่ทำค้างหาย เหมือน Clip360)
+// แอป Windows แจ้งเตือนของ Windows ด้วย · ในแท็บเชื่อมแอป AI รหัสอยู่ในการ์ดแล้ว จึงไม่ต้องมีแถบซ้ำ
+let pairingDismissed = "";
 setInterval(async () => {
+  const banner = $("#pair-banner");
   try {
-    const { open } = await api("/mcp/remote/pairing");
-    const key = open?.requesters?.length ? `${open.code}:${open.requesters.length}` : "";
-    if (key && key !== pairingSeen && !location.hash.startsWith("#/connect")) {
-      toast("แอป AI ขอเชื่อมต่อ — รหัสอยู่ในหน้าเชื่อมต่อ AI");
-      location.hash = "#/connect";
+    const { open } = await api("/mcp/pairing");
+    const asking = open?.requesters || [];
+    const key = asking.length ? `${open.code}:${asking.length}` : "";
+    const onAiTab = location.hash.startsWith("#/settings/ai");
+    if (!key || key === pairingDismissed || onAiTab) {
+      banner.hidden = true;
+      return;
     }
-    pairingSeen = key;
-  } catch { /* เซิร์ฟเวอร์ปิดอยู่ */ }
+    const who = asking[asking.length - 1];
+    banner.innerHTML = `${icon("plug")}<div><b>${esc(who.clientName)}</b> ขอเชื่อมกับ Sub360 · พิมพ์รหัส <span class="pair-inline">${esc(open.code)}</span> ในหน้าที่แอป AI เปิดขึ้นมา<small>ถ้าคุณไม่ได้กำลังเชื่อมแอปไหน ไม่ต้องทำอะไร</small></div>
+      <a class="button button-quiet button-sm" href="#/settings/ai">ดูรายละเอียด</a><button type="button" class="icon-button" data-dismiss-pair aria-label="ซ่อนแถบนี้">${icon("x")}</button>`;
+    banner.dataset.key = key;
+    banner.hidden = false;
+    hydrateIcons(banner);
+  } catch {
+    banner.hidden = true;
+  }
 }, 3000);
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("[data-dismiss-pair]")) return;
+  pairingDismissed = $("#pair-banner").dataset.key || "";
+  $("#pair-banner").hidden = true;
+});
 if (desktop) {
   desktop.onUpdate(onUpdateState);
   desktop.updateState().then(onUpdateState).catch(() => {});

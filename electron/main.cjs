@@ -5,7 +5,7 @@
 //
 // โค้ดของแอปอยู่ในโฟลเดอร์ติดตั้ง (อัปเดตแล้วถูกแทนที่ทั้งโฟลเดอร์) ส่วนงานและการตั้งค่าอยู่ที่
 // %LOCALAPPDATA%\Sub360 (SUB360_HOME) — ที่เดียวกับที่ตัวติดตั้งแบบเก่าใช้ จึงย้ายงานเดิมมาได้ง่าย
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Notification, shell } = require("electron");
 const { fork, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -70,7 +70,8 @@ function startServer() {
     const timer = setTimeout(() => reject(new Error("server ไม่ตอบภายใน 60 วินาที")), 60_000);
     server.on("message", (msg) => {
       // แอป AI (MCP) สั่ง show_in_sub360 → ดึงหน้าต่างขึ้นมาที่หน้านั้น
-      if (msg?.type === "show" || msg?.type === "attention") return bringToFront(msg);
+      if (msg?.type === "show") return bringToFront(msg);
+      if (msg?.type === "pairing") return notifyPairing(msg);
       if (msg?.type !== "ready") return;
       clearTimeout(timer);
       resolve(msg);
@@ -93,8 +94,27 @@ function bringToFront(msg) {
   if (win.isMinimized()) win.restore();
   win.show();
   win.focus();
-  if (msg.type === "attention") win.flashFrame(true); // แอป AI บนคลาวด์รอรหัสจับคู่
   if (typeof msg.hash === "string" && /^#\/[\w/-]*$/.test(msg.hash)) win.webContents.send("sub360:show", msg.hash);
+}
+
+/**
+ * แอป AI บนคลาวด์เปิดหน้าขอเชื่อมต่อ: แจ้งเตือน Windows พร้อมรหัส ไม่สลับหน้าเอง (กันงานที่ทำค้างหาย
+ * เหมือน Clip360) · กดแจ้งเตือน → เปิดแท็บเชื่อมแอป AI ในหน้าตั้งค่า
+ */
+function notifyPairing(msg) {
+  if (!win || win.isDestroyed()) return;
+  const code = /^\d{6}$/.test(String(msg.code || "")) ? msg.code : "";
+  const app = String(msg.app || "แอป AI").slice(0, 60);
+  if (Notification.isSupported()) {
+    const note = new Notification({
+      title: `${app} ขอเชื่อมต่อ Sub360`,
+      body: code ? `พิมพ์รหัส ${code} ในหน้าที่แอป AI เปิดขึ้นมา · ถ้าคุณไม่ได้กำลังเชื่อมแอปไหน ไม่ต้องทำอะไร` : "เปิด Sub360 → ตั้งค่า → เชื่อมแอป AI เพื่อดูรหัส",
+      icon: ICON,
+    });
+    note.on("click", () => bringToFront({ type: "show", hash: "#/settings/ai" }));
+    note.show();
+  }
+  win.flashFrame(true);
 }
 
 function stopServer() {
@@ -403,6 +423,8 @@ if (!SMOKE_TEST && !app.requestSingleInstanceLock()) {
     win.focus();
   });
 
+  // แจ้งเตือน Windows ต้องมี AppUserModelId ตรงกับ appId ของตัวติดตั้ง ไม่งั้นบางเครื่องไม่ขึ้น
+  if (process.platform === "win32") app.setAppUserModelId("com.work360.sub360");
   app.whenReady().then(async () => {
     fs.mkdirSync(HOME, { recursive: true });
     if (SMOKE_TEST) return runSmokeTest();

@@ -1,9 +1,8 @@
-// Cloudflare Tunnel (cloudflared) — gives the remote MCP gateway a public https address.
+// Cloudflare Quick Tunnel (cloudflared tunnel --url) — the "เปิดทางเข้าด้วย Cloudflare" button.
 //
-//   quick  cloudflared tunnel --url http://127.0.0.1:<gateway>   no account; a new *.trycloudflare.com
-//          address every start, so the AI app connection must be added again each time (for trying out)
-//   named  cloudflared tunnel run   with TUNNEL_TOKEN from the Cloudflare dashboard; the public
-//          hostname set there must point to http://localhost:<gateway> — the address never changes
+// No account needed, but the address (https://<random>.trycloudflare.com) changes every start and the
+// tunnel stops when Sub360 closes, so it is never reopened by itself. People who want a fixed address
+// run their own tunnel and use "ใช้ URL ของฉัน" instead (remote.mjs), which needs nothing from here.
 import { spawn, spawnSync } from "node:child_process";
 
 const QUICK_URL = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i;
@@ -12,15 +11,15 @@ const MAX_RESTARTS = 5;
 
 export function createTunnel({ log = console.error, onChange = () => {} } = {}) {
   let child = null;
-  let want = null; // { binary, mode, port, token, hostname }
-  let state = { state: "off", url: null, error: null, mode: null };
+  let want = null; // { binary, port }
+  let state = { state: "off", url: null, error: null };
   let restarts = 0;
   let restartTimer = null;
   let tail = [];
 
   const set = (patch) => {
     state = { ...state, ...patch };
-    onChange(state);
+    try { onChange(state); } catch { /* a listener must not stop the tunnel */ }
   };
 
   function kill(proc) {
@@ -31,19 +30,13 @@ export function createTunnel({ log = console.error, onChange = () => {} } = {}) 
 
   function launch() {
     if (!want) return;
-    const { binary, mode, port, token, hostname } = want;
-    const args = mode === "named"
-      ? ["tunnel", "--no-autoupdate", "run"]
-      : ["tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${port}`];
-    // The token goes through the environment, so it never shows up in the process list.
-    const env = { ...process.env };
-    if (mode === "named") env.TUNNEL_TOKEN = token;
-    else delete env.TUNNEL_TOKEN;
+    const { binary, port } = want;
     tail = [];
-    set({ state: "starting", url: mode === "named" ? hostname : null, error: null, mode });
+    set({ state: "starting", url: null, error: null });
     let proc;
     try {
-      proc = spawn(binary, args, { env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+      // --no-autoupdate: the copy Sub360 installed is pinned by SHA-256 and must not replace itself
+      proc = spawn(binary, ["tunnel", "--no-autoupdate", "--url", `http://127.0.0.1:${port}`], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     } catch (error) {
       set({ state: "error", error: `เปิด cloudflared ไม่ได้: ${error.message}` });
       return;
@@ -54,11 +47,11 @@ export function createTunnel({ log = console.error, onChange = () => {} } = {}) 
         if (!line.trim()) continue;
         tail.push(line.slice(0, 300));
         if (tail.length > 30) tail.shift();
-        if (mode === "quick" && !state.url) {
+        if (!state.url) {
           const m = QUICK_URL.exec(line);
-          if (m) set({ url: m[0].toLowerCase() });
+          if (m) state = { ...state, url: m[0].toLowerCase() };
         }
-        if (CONNECTED.test(line) && (mode === "named" || state.url)) {
+        if (CONNECTED.test(line) && state.url && state.state !== "connected") {
           restarts = 0;
           set({ state: "connected", error: null });
         }
@@ -74,17 +67,17 @@ export function createTunnel({ log = console.error, onChange = () => {} } = {}) 
       log(`[tunnel] exited ${code}: ${reason}`);
       if (want && restarts < MAX_RESTARTS) {
         restarts += 1;
-        set({ state: "starting", error: `กำลังต่อใหม่ (${restarts}/${MAX_RESTARTS}) — ${reason}`, url: mode === "named" ? hostname : null });
+        set({ state: "starting", url: null, error: `กำลังต่อใหม่ (${restarts}/${MAX_RESTARTS}) — ${reason}` });
         restartTimer = setTimeout(launch, Math.min(30_000, 2000 * 2 ** restarts));
       } else {
-        set({ state: "error", error: reason, url: mode === "named" ? hostname : null });
+        set({ state: "error", url: null, error: reason });
       }
     });
   }
 
   return {
     status: () => ({ ...state }),
-    /** start({ binary, mode: "quick"|"named", port, token, hostname }) — restarts if already running */
+    /** start({ binary, port }) — restarts if already running (and so gets a new address) */
     start(options) {
       this.stop();
       want = options;
@@ -97,7 +90,7 @@ export function createTunnel({ log = console.error, onChange = () => {} } = {}) 
       const proc = child;
       child = null;
       kill(proc);
-      set({ state: "off", url: null, error: null, mode: null });
+      if (state.state !== "off") set({ state: "off", url: null, error: null });
     },
     log: () => tail.slice(),
   };
