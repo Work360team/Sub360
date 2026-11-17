@@ -77,6 +77,31 @@ test.after(() => {
   fs.rmSync(HOME, { recursive: true, force: true });
 });
 
+const appApi = async (method, p, body) => {
+  const res = await fetch(`${runtime.url}/api${p}`, {
+    method, headers: { "x-sub360": "1", "content-type": "application/json" }, body: body ? JSON.stringify(body) : undefined,
+  });
+  return { status: res.status, body: await res.json() };
+};
+
+test("ปิดเป็นค่าเริ่มต้น: แอป AI ทำอะไรไม่ได้จนกว่าผู้ใช้เปิดในตั้งค่า", async () => {
+  assert.equal((await appApi("GET", "/mcp")).body.enabled, false);
+  const off = await call("list_projects", {});
+  assert.match(off.error, /ปิดอยู่/);
+  assert.match(off.error, /ตั้งค่า/);
+  const on = await appApi("POST", "/mcp/enabled", { enabled: true });
+  assert.equal(on.body.enabled, true);
+  assert.equal(typeof (await call("list_projects", {})).total, "number");
+});
+
+test("พอร์ตหลักไม่รับคำขอที่มาทาง tunnel/proxy (กันเผลอเปิดทั้งแอปออกเน็ต)", async () => {
+  for (const header of ["x-forwarded-for", "cf-connecting-ip", "forwarded"]) {
+    const res = await fetch(`${runtime.url}/api/status`, { headers: { [header]: "203.0.113.9" } });
+    assert.equal(res.status, 403, header);
+  }
+  assert.equal((await fetch(`${runtime.url}/api/status`)).status, 200);
+});
+
 test("initialize และ tools/list ตามกติกา", async () => {
   const init = await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2099-01-01", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
   assert.equal(init.body.result.protocolVersion, "2025-11-25", "รุ่นที่ไม่รู้จักถอยมารุ่นล่าสุดที่รองรับ");
@@ -191,6 +216,38 @@ test("วิดีโอ → นำเข้าซับ → แก้ → ย�
   const final = await call("get_project", { id });
   assert.equal(final.status, "rendered");
   assert.equal(final.output.is_outdated, false);
+  assert.match(final.next, /get_video_link/);
+
+  // ลิงก์ดูคลิป: ยังไม่เปิดทางเข้าจากอินเทอร์เน็ต → เปิดได้บนเครื่องนี้ หน้าดูมีวิดีโอและปุ่มดาวน์โหลด
+  const link = await call("get_video_link", { id });
+  assert.equal(link.reachable_from, "this_computer_only");
+  assert.ok(link.watch_url.startsWith(`${runtime.url}/v/`));
+  const page = await fetch(link.watch_url);
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-security-policy"), /media-src 'self'/);
+  const html = await page.text();
+  assert.match(html, /<video controls/);
+  assert.match(html, /ดาวน์โหลด MP4/);
+  const clip = await fetch(link.video_url, { headers: { range: "bytes=0-99" } });
+  assert.equal(clip.status, 206);
+  assert.equal(clip.headers.get("content-type"), "video/mp4");
+  assert.match((await fetch(link.download_url, { method: "HEAD" })).headers.get("content-disposition"), /^attachment/);
+  assert.equal((await fetch(`${runtime.url}/v/${"x".repeat(32)}`)).status, 404);
+  assert.equal((await appApi("GET", "/mcp")).body.videoLinks, 1);
+  await appApi("DELETE", "/mcp/video-links");
+  assert.equal((await fetch(link.watch_url)).status, 404, "ยกเลิกลิงก์ทั้งหมดแล้วเปิดไม่ได้");
+
+  // สิ่งที่แอป AI ทำล่าสุด: บันทึกงานที่เปลี่ยนอะไร ไม่บันทึกการอ่าน
+  const activity = (await appApi("GET", "/mcp")).body.activity;
+  assert.ok(activity.some((a) => a.tool === "render_video" && a.ok && a.app === "แอปบนเครื่องนี้"));
+  assert.ok(activity.some((a) => a.summary.startsWith("ขอยืนยัน: ")), "ขั้นยืนยันถูกบันทึกว่ายังรอ");
+  assert.ok(!activity.some((a) => ["get_project", "wait_for_job", "get_subtitles"].includes(a.tool)));
+
+  // ดูได้อย่างเดียว: อ่านได้ แต่สร้าง/แก้/เรนเดอร์ไม่ได้
+  await appApi("POST", "/mcp/write", { enabled: false });
+  assert.match((await call("render_video", { id })).error, /ดูข้อมูลได้อย่างเดียว/);
+  assert.equal((await call("get_project", { id })).id, id);
+  await appApi("POST", "/mcp/write", { enabled: true });
 });
 
 test("stdio bridge: ตอบ initialize เอง และส่ง tools/call ต่อไปที่ Sub360", async () => {

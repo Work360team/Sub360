@@ -172,7 +172,7 @@ function failure(error) {
  * createMcp({ tools, instructions, version, mapError })
  *   handle(message, { remote, client }) → JSON-RPC response, array, or null for notifications
  */
-export function createMcp({ tools, instructions, version, mapError = () => null, log = console.error }) {
+export function createMcp({ tools, instructions, version, mapError = () => null, gate = () => null, onToolCall = () => {}, log = console.error }) {
   const byName = new Map(tools.map((t) => [t.name, t]));
   if (byName.size !== tools.length) throw new Error("createMcp: duplicate tool name");
   const listed = tools.map(describe);
@@ -185,14 +185,23 @@ export function createMcp({ tools, instructions, version, mapError = () => null,
     const schema = describe(tool).inputSchema;
     const problems = validate(schema, args);
     if (Object.keys(problems).length) return { result: failure(new ToolError("argument ไม่ถูกต้อง", { fields: problems })) };
+    // Master switch / read-only switch (the person decides in Settings, not the AI app).
+    const blocked = gate(tool, session);
+    if (blocked) return { result: failure(blocked) };
     const ctx = {
       remote: Boolean(session.remote),
       client: session.client || "local",
       confirm: (impact) => confirmations.check(session.client || "local", tool.name, args, impact),
     };
+    const record = (ok, result) => {
+      try { onToolCall({ tool, ok, session, args, result }); } catch { /* the activity list must never break a tool */ }
+    };
     try {
-      return { result: answer(await tool.run(args, ctx)) };
+      const result = await tool.run(args, ctx);
+      record(true, result);
+      return { result: answer(result) };
     } catch (error) {
+      record(false, null);
       if (error instanceof ToolError) return { result: failure(error) };
       const mapped = mapError(error);
       if (mapped) return { result: failure(mapped) };

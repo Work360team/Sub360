@@ -22,7 +22,7 @@ import {
   cancelInstall, checkCloudflared, exposeBinOnPath, homeDir, installCloudflared, installFfmpeg, installState, installWhisper,
   invalidateSetupStatus, setEnvValue as writeEnv, setupStatus,
 } from "./setup.mjs";
-import { createRemote, extractTunnelToken, normalizeHostname } from "./mcp/remote.mjs";
+import { createRemote } from "./mcp/remote.mjs";
 import { appVersion } from "./version.mjs";
 import { createMcp } from "./mcp/protocol.mjs";
 import { createTools, INSTRUCTIONS as MCP_INSTRUCTIONS } from "./mcp/tools.mjs";
@@ -410,9 +410,7 @@ async function handleApi(req, res, url) {
   if (parts[1] === "status" && method === "GET") {
     return sendJson(res, 200, { ...(await toolStatus()), queue: queue.length, current: current?.id ?? null });
   }
-  if (parts[1] === "mcp" && parts[2] === "local-config" && method === "GET") {
-    return sendJson(res, 200, localMcpConfig());
-  }
+  if (parts[1] === "mcp") return handleMcpApi(req, res, parts.slice(2), method);
   if (parts[1] === "styles" && method === "GET") {
     return sendJson(res, 200, { styles: listStyles(), colorSets: CAPTION_COLOR_SETS, languages: TRANSLATE_LANGS });
   }
@@ -435,7 +433,6 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, { ok: true });
     }
   }
-  if (parts[1] === "mcp" && parts[2] === "remote") return handleRemoteApi(req, res, parts.slice(3), method);
   if (parts[1] === "settings" && parts[2] === "gemini") {
     if (method === "GET") return sendJson(res, 200, geminiStatus());
     if (method === "PUT") {
@@ -649,18 +646,40 @@ function serveStatic(req, res, url) {
 
 /* ---------- MCP: ให้แอป AI สั่งงาน (docs/MCP_PLAN.md) ---------- */
 // แอป AI ในเครื่องคุยผ่าน server/mcp-stdio.mjs ซึ่งส่งต่อมาที่ POST /mcp พร้อมกุญแจใน mcp-runtime.json
-// tools เรียก /api ชุดเดียวกับหน้าต่าง จึงใช้คิวงาน การตรวจ และสถานะ "กำลังทำ" ร่วมกัน
+// แอป AI บนคลาวด์เข้าทาง gateway (server/mcp/remote.mjs) — tools เรียก /api ชุดเดียวกับหน้าต่าง
+// จึงใช้คิวงาน การตรวจ และสถานะ "กำลังทำ" ร่วมกัน · ปิดเป็นค่าเริ่มต้น เปิดที่ ตั้งค่า → เชื่อมแอป AI
 const MCP_KEY = randomBytes(32).toString("base64url");
 let baseUrl = "";
+
+const remote = createRemote({
+  home: HOME,
+  findCloudflared: () => cloudflared(),
+  localBase: () => baseUrl,
+  // แอป AI เปิดหน้าขอเชื่อมต่อ → แจ้งเตือน Windows พร้อมรหัส (ไม่สลับหน้าเอง กันงานที่ทำค้างหาย)
+  notify: (event) => process.send?.({ type: "pairing", hash: "#/settings/ai", code: event.code, app: event.app, host: event.host }),
+  // ไฟล์ที่ลิงก์ดูคลิปเปิดได้: เฉพาะไฟล์ผลลัพธ์ที่เรนเดอร์แล้วในโฟลเดอร์ out/ ของโปรเจกต์
+  files: {
+    resolve(id, kind) {
+      let project;
+      try { project = store.read(id); } catch { return null; }
+      const file = project.result?.files?.[kind];
+      const spec = DOWNLOADS[kind];
+      if (!file || !spec) return null;
+      return { path: path.join(store.projectDir(id), "out", path.basename(file)), name: `${project.title}${spec.suffix}` };
+    },
+  },
+});
+
 const mcp = createMcp({
   version: VERSION.version || VERSION.label || "0",
   instructions: MCP_INSTRUCTIONS,
+  gate: (tool) => remote.gate(tool),
+  onToolCall: (call) => remote.recordCall(call),
   tools: createTools({
     api: createLocalApi(() => baseUrl),
     catalog: { styles: listStyles, colorSets: CAPTION_COLOR_SETS, languages: TRANSLATE_LANGS },
     projectDir: (id) => store.projectDir(id),
-    // ลิงก์ออนไลน์ของไฟล์ผลลัพธ์ผ่าน tunnel (null เมื่อไม่ได้เปิดแอป AI บนคลาวด์)
-    fileLinks: (project) => remote.fileLinks(project.id, Object.keys(project.result?.files || {})),
+    videoLink: (id) => remote.createVideoLink(id),
     showProject: async (id) => {
       const hash = id ? `#/p/${id}` : "#/";
       if (process.send) {
@@ -672,30 +691,9 @@ const mcp = createMcp({
     },
   }),
 });
+remote.attachMcp(mcp);
 
-// แอป AI บนคลาวด์: gateway + Cloudflare Tunnel (ปิดเป็นค่าเริ่มต้น เปิดในหน้า "เชื่อมต่อ AI")
-const remote = createRemote({
-  home: HOME,
-  mcp,
-  findCloudflared: () => cloudflared(),
-  getToken: () => process.env.SUB360_TUNNEL_TOKEN || "",
-  // แอป AI เปิดหน้าขอเชื่อมต่อ → ดึงหน้าต่างขึ้นมาที่หน้าเชื่อมต่อ AI ซึ่งแสดงรหัส
-  onAttention: () => process.send?.({ type: "attention", hash: "#/connect" }),
-  // ไฟล์ที่ลิงก์ออนไลน์เปิดได้: เฉพาะไฟล์ผลลัพธ์ที่เรนเดอร์แล้วในโฟลเดอร์ out/ ของโปรเจกต์
-  files: {
-    resolve(id, kind) {
-      let project;
-      try { project = store.read(id); } catch { return null; }
-      const file = project.result?.files?.[kind];
-      const spec = DOWNLOADS[kind];
-      if (!file || !spec) return null;
-      const suffix = kind === "srtTranslated" && project.translation?.lang ? `.${project.translation.lang}.srt` : spec.suffix;
-      return { path: path.join(store.projectDir(id), "out", path.basename(file)), name: `${project.title}${suffix}` };
-    },
-  },
-});
-
-// ตรวจ cloudflared ด้วยการรันโปรแกรม — เก็บผลไว้ หน้าเชื่อมต่อ AI ถามสถานะทุก 2 วินาที
+// ตรวจ cloudflared ด้วยการรันโปรแกรม — เก็บผลไว้ หน้าตั้งค่าถามสถานะทุกไม่กี่วินาที
 let cloudflaredCache = null;
 async function cloudflared() {
   if (cloudflaredCache && Date.now() - cloudflaredCache.at < 60_000 && installState().cloudflared.state !== "done") return cloudflaredCache.value;
@@ -704,56 +702,62 @@ async function cloudflared() {
   return value;
 }
 
-async function remoteStatus() {
+async function mcpStatus() {
   const install = installState().cloudflared;
   if (install.state === "done") cloudflaredCache = null;
-  return { ...remote.status(), cloudflared: await cloudflared(), install };
+  return { ...remote.status(), local: localMcpConfig(), cloudflared: await cloudflared(), install };
 }
 
-/** /api/mcp/remote/* — เฉพาะหน้าต่าง Sub360 (พอร์ตหลัก) ไม่มีทางเรียกผ่าน tunnel */
-async function handleRemoteApi(req, res, rest, method) {
-  if (!rest.length && method === "GET") return sendJson(res, 200, await remoteStatus());
-  if (!rest.length && method === "PUT") {
-    const body = await readJson(req, 16 * 1024);
-    const patch = {};
-    if (typeof body.enabled === "boolean") patch.enabled = body.enabled;
-    if (["quick", "named"].includes(body.mode)) patch.mode = body.mode;
-    if (typeof body.hostname === "string") {
-      if (body.hostname.trim() && !normalizeHostname(body.hostname)) throw httpError(400, "ชื่อโดเมนไม่ถูกต้อง — ใส่แบบ sub360.example.com");
-      patch.hostname = normalizeHostname(body.hostname) || "";
+/** /api/mcp/* — เฉพาะหน้าต่าง Sub360 (พอร์ตหลัก 127.0.0.1) ไม่มีทางเรียกผ่าน tunnel */
+async function handleMcpApi(req, res, rest, method) {
+  const route = rest.join("/");
+  const reply = async () => sendJson(res, 200, await mcpStatus());
+  const body = ["POST", "PUT"].includes(method) ? await readJson(req, 16 * 1024) : {};
+  try {
+    if (route === "" && method === "GET") return reply();
+    if (route === "local-config" && method === "GET") return sendJson(res, 200, localMcpConfig());
+    if (route === "enabled" && method === "POST") {
+      await remote.setEnabled(body.enabled === true);
+      return reply();
     }
-    if (typeof body.token === "string") {
-      const token = body.token.trim() ? extractTunnelToken(body.token) : "";
-      if (body.token.trim() && !token) throw httpError(400, "ไม่พบโทเค็นในข้อความที่วาง — คัดลอกคำสั่งที่ขึ้นต้นด้วย eyJ… จากหน้า Cloudflare");
-      setEnvValue("SUB360_TUNNEL_TOKEN", token);
+    if (route === "write" && method === "POST") {
+      remote.setWriteEnabled(body.enabled !== false);
+      return reply();
     }
-    await remote.update(patch);
-    return sendJson(res, 200, await remoteStatus());
-  }
-  if (rest[0] === "restart" && method === "POST") {
-    await remote.restart();
-    return sendJson(res, 200, await remoteStatus());
-  }
-  // เชื่อมแอปใหม่ได้เฉพาะเมื่อคนกดเริ่มในหน้าต่างนี้ — แอป AI ได้รหัสจากคนที่พิมพ์เท่านั้น
-  if (rest[0] === "pairing" && method === "POST") {
-    if (!remote.startPairing()) throw httpError(409, "เปิดการเชื่อมต่อแอป AI บนคลาวด์ก่อน แล้วรอให้ tunnel พร้อม");
-    return sendJson(res, 200, await remoteStatus());
-  }
-  if (rest[0] === "pairing" && method === "DELETE") {
-    remote.cancelPairing();
-    return sendJson(res, 200, await remoteStatus());
-  }
-  // เบา ๆ ให้หน้าต่างถามทุกไม่กี่วินาที: มีแอป AI รอรหัสอยู่ไหม (เปิดผ่านเบราว์เซอร์ไม่มี Electron ดึงหน้าต่างให้)
-  if (rest[0] === "pairing" && method === "GET") return sendJson(res, 200, remote.pairingStatus());
-  // ยกเลิกลิงก์ออนไลน์ทั้งหมดที่เคยให้แอป AI ไป (เปลี่ยนกุญแจลายเซ็น)
-  if (rest[0] === "links" && method === "DELETE") {
-    remote.resetFileLinks();
-    return sendJson(res, 200, await remoteStatus());
-  }
-  if (rest[0] === "connections" && method === "DELETE") {
-    if (rest[1]) remote.revoke(rest[1]);
-    else remote.revokeAll();
-    return sendJson(res, 200, await remoteStatus());
+    if (route === "remote" && method === "PUT") {
+      if (!remote.access.enabled) throw httpError(409, "เปิดการเชื่อมต่อ AI ก่อน");
+      await remote.setRemote(body.mode, body.url);
+      return reply();
+    }
+    if (route === "remote/retry" && method === "POST") {
+      await remote.retry();
+      return reply();
+    }
+    // การเชื่อมใหม่: รหัสอยู่ในหน้าต่างนี้เท่านั้น แอป AI ได้รหัสจากคนที่พิมพ์
+    if (route === "pairing" && method === "GET") return sendJson(res, 200, remote.pairingStatus());
+    if (route === "pairing" && method === "POST") {
+      if (!remote.startPairing()) throw httpError(409, "เปิดทางเข้าจากอินเทอร์เน็ตก่อน แล้วรอให้พร้อม");
+      return reply();
+    }
+    if (route === "pairing" && method === "DELETE") {
+      remote.cancelPairing();
+      return reply();
+    }
+    if (rest[0] === "connections" && method === "DELETE") {
+      if (rest[1]) remote.revoke(rest[1]);
+      else remote.revokeAll();
+      return reply();
+    }
+    if (route === "video-links" && method === "DELETE") {
+      remote.clearVideoLinks();
+      return reply();
+    }
+    if (route === "notice" && method === "DELETE") {
+      remote.dismissNotice();
+      return reply();
+    }
+  } catch (error) {
+    throw error.status ? httpError(error.status, error.message) : error;
   }
   throw httpError(404, "ไม่พบ API");
 }
@@ -778,12 +782,21 @@ function openInBrowser(address) {
   spawn(opener[0], opener[1], { detached: true, stdio: "ignore" }).unref();
 }
 
+// ส่วนหัวที่ tunnel/proxy ใส่มา — พอร์ตหลักต้องไม่มีวันถูกเรียกผ่านอินเทอร์เน็ต
+// (ถ้าผู้ใช้ชี้ tunnel ของตัวเองมาผิดพอร์ต tunnel ที่เปลี่ยน Host เป็น 127.0.0.1 จะเปิดทั้งแอปออกเน็ตได้)
+const PROXY_HEADERS = ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-real-ip", "cf-connecting-ip", "cf-ray", "true-client-ip"];
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || HOST}`);
   // กัน DNS rebinding: หน้าเว็บอื่นจะยิงเข้ามาผ่านชื่อโดเมนของตัวเองไม่ได้
   const host = String(req.headers.host || "").replace(/:\d+$/, "");
   if (!["127.0.0.1", "localhost"].includes(host)) return sendJson(res, 403, { error: "forbidden host" });
+  if (PROXY_HEADERS.some((name) => req.headers[name])) {
+    return sendJson(res, 403, { error: `ทางนี้เปิดได้เฉพาะบนเครื่องนี้ — tunnel ต้องชี้ไปที่พอร์ต ${remote.status().remote.gatewayPort} (gateway) ไม่ใช่หน้าแอป` });
+  }
   try {
+    // ลิงก์ดูคลิปตอนยังไม่ได้เปิดทางเข้าจากอินเทอร์เน็ต (เปิดได้บนเครื่องนี้)
+    if (url.pathname.startsWith("/v/") && remote.serveVideoLink(req, res, url)) return;
     if (url.pathname === "/mcp") {
       // ต้องมีกุญแจจาก mcp-runtime.json และไม่ใช่คำขอจากหน้าเว็บอื่นในเบราว์เซอร์
       if (req.headers.origin || !sameKey(req.headers["x-sub360-mcp-key"])) return sendJson(res, 403, { error: "forbidden" });

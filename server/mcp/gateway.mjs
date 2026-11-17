@@ -17,9 +17,7 @@
 //   - state can be ~1,700 characters (Gemini) → accept up to 8,000
 //   - the consent page never answers a form POST with 302 (Chrome blocks it under CSP form-action):
 //     the page posts with fetch and navigates itself
-import fs from "node:fs";
-import path from "node:path";
-import { createHash, createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { readBody, sendJson, serveMcp } from "./http.mjs";
 
 const ACCESS_TTL_S = 3600;
@@ -28,7 +26,6 @@ const CODE_TTL_MS = 5 * 60_000;
 const PAIRING_TTL_MS = 10 * 60_000;
 const PAIRING_MAX_FAILURES = 10;
 const AUTO_PAIRING_LOCK_MS = 10 * 60_000;
-const FILE_LINK_TTL_MS = 3 * 86_400_000;
 const ROTATE_GRACE_MS = 60_000;
 const REUSE_WATCH_MS = 86_400_000; // a rotated refresh token is kept a day to catch reuse
 const MAX_CLIENTS = 300;
@@ -102,9 +99,9 @@ const clientIp = (req) => String(req.headers["cf-connecting-ip"] || "local").sli
  * createGateway({ store, mcp, publicUrl, onPairing, files, log })
  *   publicUrl()       "https://<tunnel host>" or null while the tunnel is not up
  *   onPairing(status) an AI app opened the consent page: show the code in the Sub360 window
- *   files.resolve(projectId, kind) → { path, name } of a rendered output, or null
+ *   videoLinks.serve(req, res, url) → watch links (/v/<token>) for rendered videos
  */
-export function createGateway({ store, mcp, publicUrl, onPairing = () => {}, files = null, log = console.error }) {
+export function createGateway({ store, mcp, publicUrl, onPairing = () => {}, videoLinks = null, log = console.error }) {
   const codes = new Map(); // sha256(code) → authorization code record
   const registrations = new Map(); // ip → { since, count }
   let pairing = null; // { code, expiresAt, failures, auto, requesters: [{ clientName, redirectHost, at }] }
@@ -355,7 +352,9 @@ export function createGateway({ store, mcp, publicUrl, onPairing = () => {}, fil
       if (!body.code_verifier || pkce(body.code_verifier) !== c.codeChallenge) return tokenError(res, "invalid_grant", "PKCE verification failed");
       // The connection exists from the first successful exchange (an unused code leaves nothing behind).
       const grantId = secret(12);
-      store.addGrant(grantId, { clientId: c.clientId, clientName: c.clientName, redirectHost: c.redirectHost });
+      // Remember the address this connection was made through: when it stops leading here (a new quick
+      // tunnel), Sub360 retires the connection and tells the owner instead of leaving a dead entry.
+      store.addGrant(grantId, { clientId: c.clientId, clientName: c.clientName, redirectHost: c.redirectHost, issuer: base() });
       c.used = true;
       c.grantId = grantId;
       return sendJson(res, 200, issueTokens(grantId, c.clientId), CORS);
@@ -402,59 +401,6 @@ export function createGateway({ store, mcp, publicUrl, onPairing = () => {}, fil
     return { grant: { id: t.grantId, ...grant }, given: true };
   }
 
-  /* ---------- online links to rendered files ---------- */
-  // /files/<project>/<kind>?e=<expiry>&s=<HMAC> — anyone with the link can watch or download that one
-  // file until it expires (3 days), and only while Sub360 and the tunnel are running. The key lives in
-  // mcp-remote.json; changing it (store.resetLinkKey) kills every link at once.
-
-  const FILE_TYPES = {
-    ".mp4": "video/mp4", ".srt": "text/plain; charset=utf-8", ".ass": "text/plain; charset=utf-8",
-    ".vtt": "text/vtt; charset=utf-8", ".txt": "text/plain; charset=utf-8",
-  };
-  const signFile = (id, kind, exp) => createHmac("sha256", store.linkKey()).update(`${id}\n${kind}\n${exp}`).digest("base64url");
-
-  /** A link to a rendered file, or null while there is no public address. */
-  function fileLink(id, kind, ttlMs = FILE_LINK_TTL_MS) {
-    if (!base()) return null;
-    const exp = Math.floor((Date.now() + ttlMs) / 1000);
-    return `${base()}/files/${encodeURIComponent(id)}/${encodeURIComponent(kind)}?e=${exp}&s=${signFile(id, kind, exp)}`;
-  }
-
-  function serveFile(req, res, id, kind, url) {
-    const exp = Number(url.searchParams.get("e"));
-    const valid = /^[a-z0-9]{6,32}$/.test(id) && /^[A-Za-z0-9]{2,20}$/.test(kind) && Number.isInteger(exp)
-      && exp * 1000 > Date.now() && sameText(url.searchParams.get("s") || "", signFile(id, kind, exp));
-    if (!valid) return sendJson(res, 403, { error: "ลิงก์นี้หมดอายุหรือไม่ถูกต้อง — ขอลิงก์ใหม่จากแอป AI (get_project)" });
-    const file = files?.resolve(id, kind);
-    let stat = null;
-    try { stat = file && fs.statSync(file.path); } catch { /* gone */ }
-    if (!stat?.isFile()) return sendJson(res, 404, { error: "ไม่พบไฟล์นี้แล้ว — อาจถูกลบหรือเรนเดอร์ใหม่" });
-    const headers = {
-      "content-type": FILE_TYPES[path.extname(file.path).toLowerCase()] || "application/octet-stream",
-      "accept-ranges": "bytes",
-      "cache-control": "private, no-store",
-      "x-content-type-options": "nosniff",
-      "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(file.name)}`,
-    };
-    // Subtitle text came from the video's speech: never let a browser treat it as a page.
-    if (!headers["content-type"].startsWith("video/")) headers["content-security-policy"] = "default-src 'none'; sandbox";
-    const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range || ""));
-    if (range && (range[1] || range[2])) {
-      const start = range[1] ? Number(range[1]) : Math.max(0, stat.size - Number(range[2]));
-      const end = range[1] && range[2] ? Math.min(Number(range[2]), stat.size - 1) : stat.size - 1;
-      if (start >= stat.size || start > end) {
-        res.writeHead(416, { "content-range": `bytes */${stat.size}` });
-        return res.end();
-      }
-      res.writeHead(206, { ...headers, "content-range": `bytes ${start}-${end}/${stat.size}`, "content-length": end - start + 1 });
-      if (req.method === "HEAD") return res.end();
-      return fs.createReadStream(file.path, { start, end }).pipe(res);
-    }
-    res.writeHead(200, { ...headers, "content-length": stat.size });
-    if (req.method === "HEAD") return res.end();
-    return fs.createReadStream(file.path).pipe(res);
-  }
-
   /* ---------- routing ---------- */
 
   async function handle(req, res) {
@@ -462,8 +408,13 @@ export function createGateway({ store, mcp, publicUrl, onPairing = () => {}, fil
     const p = url.pathname.replace(/\/+$/, "") || "/";
     try {
       if (!base()) return sendJson(res, 503, { error: "Sub360 tunnel is starting" });
-      // Only the public address is served: blocks DNS rebinding from web pages on this computer.
-      if (String(req.headers.host || "").toLowerCase() !== new URL(base()).host) {
+      // Only the public address is served: blocks DNS rebinding from web pages on this computer. A tunnel
+      // that rewrites Host to 127.0.0.1 is accepted only when it says which public host it came through.
+      const publicHost = new URL(base()).host;
+      const host = String(req.headers.host || "").toLowerCase();
+      const viaRewritingTunnel = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host)
+        && String(req.headers["x-forwarded-host"] || "").toLowerCase() === publicHost;
+      if (host !== publicHost && !viaRewritingTunnel) {
         return sendJson(res, 421, { error: "misdirected request" });
       }
       if (req.method === "OPTIONS") {
@@ -481,8 +432,7 @@ export function createGateway({ store, mcp, publicUrl, onPairing = () => {}, fil
           return sendJson(res, 200, authServer(), CORS);
         }
         if (p === "/oauth/authorize") return authorize(res, url);
-        const fileRoute = /^\/files\/([^/]+)\/([^/]+)$/.exec(p);
-        if (fileRoute) return serveFile(req, res, decodeURIComponent(fileRoute[1]), decodeURIComponent(fileRoute[2]), url);
+        if (url.pathname.startsWith("/v/") && videoLinks?.serve(req, res, url)) return;
       }
       if (req.method === "POST" && p === "/oauth/authorize/pair") return await pair(req, res);
       if (req.method === "POST" && p === "/oauth/register") return await register(req, res);
@@ -513,7 +463,7 @@ export function createGateway({ store, mcp, publicUrl, onPairing = () => {}, fil
     }
   }
 
-  return { handle, startPairing, cancelPairing, pairingStatus, fileLink };
+  return { handle, startPairing, cancelPairing, pairingStatus };
 }
 
 /* ---------- pages ---------- */

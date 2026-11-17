@@ -9,6 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const isAscii = (value) => /^[\x20-\x7E]*$/.test(String(value ?? ""));
 const EXE = process.platform === "win32" ? ".exe" : "";
@@ -404,12 +405,20 @@ export function installWhisper(root, envFile, modelKey = "large") {
 
 /* ---------- cloudflared (ให้แอป AI บนคลาวด์เชื่อมผ่าน Cloudflare Tunnel) ---------- */
 
-const CLOUDFLARED_ASSETS = {
-  "win32-x64": "cloudflared-windows-amd64.exe",
-  "win32-arm64": "cloudflared-windows-amd64.exe",
-  "linux-x64": "cloudflared-linux-amd64",
-  "linux-arm64": "cloudflared-linux-arm64",
-};
+// ตรึงรุ่นและ SHA-256 ไว้ (รุ่นเดียวกับที่ Clip360 ตรวจแล้ว) — ไฟล์ที่ไม่ตรงจะไม่ถูกเปิดเลย
+// เปลี่ยนรุ่น: ดาวน์โหลดไฟล์จากหน้า release ของ cloudflare/cloudflared แล้วใส่ขนาดและ SHA-256 ใหม่
+export const CLOUDFLARED_RELEASE = Object.freeze({
+  version: "2026.10.7",
+  url: "https://github.com/cloudflare/cloudflared/releases/download/2026.10.7/cloudflared-windows-amd64.exe",
+  sha256: "2493dbc168923bb3e59e5e7716f71deced92992eea9acd6e9d74f84ac7751343",
+  size: 55_390_512,
+});
+
+async function sha256File(file) {
+  const hash = createHash("sha256");
+  for await (const chunk of fs.createReadStream(file)) hash.update(chunk);
+  return hash.digest("hex");
+}
 
 /** cloudflared ที่ใช้ได้: ที่ตั้งใน .env → ที่ติดตั้งให้ใน data/bin → ใน PATH → ที่ตัวติดตั้งของ Cloudflare วางไว้ */
 export async function checkCloudflared(root) {
@@ -435,19 +444,24 @@ export async function checkCloudflared(root) {
 
 export function installCloudflared(root) {
   return startInstall("cloudflared", async (signal, progress) => {
-    const asset = CLOUDFLARED_ASSETS[`${process.platform}-${process.arch}`];
-    if (!asset) throw new Error("ติดตั้งอัตโนมัติยังไม่รองรับเครื่องนี้ — ติดตั้ง cloudflared เองตามคู่มือของ Cloudflare แล้วกดตรวจอีกครั้ง");
+    if (process.platform !== "win32" || process.arch !== "x64") {
+      throw new Error("ติดตั้ง cloudflared ให้อัตโนมัติได้เฉพาะ Windows 64 บิต — ติดตั้ง cloudflared เองแล้วกดตรวจอีกครั้ง");
+    }
     const dir = binDir(root);
     fs.mkdirSync(dir, { recursive: true });
     const target = path.join(dir, `cloudflared${EXE}`);
     const temp = `${target}.download`;
-    progress(2, "กำลังดาวน์โหลด cloudflared จาก GitHub ของ Cloudflare");
-    await download(`https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}`, temp, {
-      maxBytes: 200 * 1024 * 1024,
+    progress(2, `กำลังดาวน์โหลด cloudflared ${CLOUDFLARED_RELEASE.version} จาก GitHub ของ Cloudflare`);
+    await download(CLOUDFLARED_RELEASE.url, temp, {
+      maxBytes: CLOUDFLARED_RELEASE.size + 1024,
       signal,
-      onProgress: ({ received, ratio }) => progress(2 + (ratio ?? 0) * 90, `กำลังดาวน์โหลด cloudflared · ${(received / 1e6).toFixed(0)} MB`),
+      onProgress: ({ received }) => progress(2 + (received / CLOUDFLARED_RELEASE.size) * 88, `กำลังดาวน์โหลด cloudflared · ${(received / 1e6).toFixed(0)} / ${(CLOUDFLARED_RELEASE.size / 1e6).toFixed(0)} MB`),
     });
-    if (process.platform !== "win32") fs.chmodSync(temp, 0o755);
+    progress(92, "กำลังตรวจลายนิ้วมือไฟล์ (SHA-256)");
+    if (fs.statSync(temp).size !== CLOUDFLARED_RELEASE.size || (await sha256File(temp)) !== CLOUDFLARED_RELEASE.sha256) {
+      fs.rmSync(temp, { force: true });
+      throw new Error("ไฟล์ cloudflared ที่ดาวน์โหลดมาไม่ตรงกับที่ Cloudflare เผยแพร่ จึงไม่เปิดใช้ — ลองใหม่อีกครั้ง");
+    }
     progress(94, "กำลังตรวจไฟล์");
     const res = await runCli(temp, ["--version"], { timeoutMs: 15_000, signal });
     if (res.code !== 0) {

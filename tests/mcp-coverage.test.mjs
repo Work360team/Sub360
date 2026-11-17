@@ -31,12 +31,20 @@ const COVERAGE = {
   'action === "translate" && method === "POST"': "translate_subtitles",
   'action === "render" && method === "POST"': "render_video",
   'action === "cancel" && method === "POST"': "cancel_job",
-  '!rest.length && method === "PUT"': { people: "turning on cloud access and the tunnel token are the person's decision" },
-  'rest[0] === "restart" && method === "POST"': { people: "tunnel control stays with the person" },
-  'rest[0] === "pairing" && method === "POST"': { people: "a new AI app connection starts only from the person in the Sub360 window" },
-  'rest[0] === "pairing" && method === "DELETE"': { people: "pairing is controlled by the person" },
-  'rest[0] === "links" && method === "DELETE"': { people: "revoking every online file link is the person's decision" },
+  'route === "enabled" && method === "POST"': { people: "the master switch for AI apps is the person's decision" },
+  'route === "write" && method === "POST"': { people: "the read-only switch is the person's decision" },
+  'route === "remote" && method === "PUT"': { people: "opening internet access (Cloudflare or your URL) is the person's decision" },
+  'route === "remote/retry" && method === "POST"': { people: "tunnel control stays with the person" },
+  'route === "pairing" && method === "POST"': { people: "a new AI app connection is paired from the Sub360 window" },
+  'route === "pairing" && method === "DELETE"': { people: "pairing is controlled by the person" },
   'rest[0] === "connections" && method === "DELETE"': { people: "cancelling connections is done by the person" },
+  'route === "video-links" && method === "DELETE"': { people: "revoking every watch link is the person's decision" },
+  'route === "notice" && method === "DELETE"': { people: "dismissing the address-change notice is the person's" },
+};
+
+// tools ที่ไม่มี route ของ /api เพราะเป็นของ MCP เอง (ทำงานผ่านกติกาเดียวกับ route อื่น)
+const MCP_ONLY = {
+  get_video_link: "creates a watch link in the MCP access store; the file is served from the project's out/ folder",
 };
 
 const tools = createTools({
@@ -59,7 +67,7 @@ test("ทุก route ที่เปลี่ยนข้อมูลมี too
   }
   // tool เขียนทุกตัวต้องผูกกับ route จริง (ไม่มีทางลัดที่ข้าม /api)
   const mapped = new Set(Object.values(COVERAGE).filter((t) => typeof t === "string"));
-  for (const t of tools.filter((x) => x.kind !== "read")) assert.ok(mapped.has(t.name), `${t.name} ไม่ได้ผูกกับ route ใน COVERAGE`);
+  for (const t of tools.filter((x) => x.kind !== "read")) assert.ok(mapped.has(t.name) || MCP_ONLY[t.name], `${t.name} ไม่ได้ผูกกับ route ใน COVERAGE`);
 });
 
 test("กติกาความปลอดภัยของ tools", () => {
